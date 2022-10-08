@@ -184,6 +184,7 @@ public:
 		case Error::CloneMismatch:	return "Clone container must have equal child nodes";
 		case Error::IllegalCompilation: return "Can't compile networks with this node. Uncheck the `AllowCompilation` flag to remove the error.";
 		case Error::CompileFail:	s << "Compilation error** at Line " << e.expected << ", Column " << e.actual; return s;
+		case Error::UnscaledModRangeMismatch: s << "Unscaled mod range mismatch.  \n> Copy range to source"; return s;
 		default:
 			break;
 		}
@@ -261,6 +262,12 @@ public:
 		const snex::Types::PolyHandler::ScopedAllVoiceSetter internalSetter;
 	};
 
+    struct IdChange
+    {
+        String oldId;
+        String newId;
+    };
+    
 	class Holder
 	{
 	public:
@@ -351,7 +358,12 @@ public:
 		void setVoiceKillerToUse(snex::Types::VoiceResetter* vk_)
 		{
 			if (isPolyphonic())
+			{
 				vk = vk_;
+
+				if (getActiveNetwork())
+					getActiveNetwork()->setVoiceKiller(vk);
+			}
 		}
 
 		SimpleReadWriteLock& getNetworkLock() { return connectLock; }
@@ -756,7 +768,7 @@ public:
 
 	bool isRenderingFirstVoice() const noexcept { return !isPolyphonic() || getPolyHandler()->getVoiceIndex() == 0; }
 
-	bool isInitialised() const noexcept { return currentSpecs.blockSize > 0 && currentSpecs.numChannels > 0; };
+    bool isInitialised() const noexcept { return initialised; };
 
 	bool isForwardingControlsToParameters() const
 	{
@@ -824,7 +836,7 @@ public:
 		NodeBase::Ptr root;
 	} networkParameterHandler;
 
-	ValueTree cloneValueTreeWithNewIds(const ValueTree& treeToClone);
+	ValueTree cloneValueTreeWithNewIds(const ValueTree& treeToClone, Array<IdChange>& idChanges, bool changeIds);
 
 	void setEnableUndoManager(bool shouldBeEnabled)
 	{
@@ -935,8 +947,31 @@ public:
 
 	void runPostInitFunctions();
 
+	static void initKeyPresses(Component* root);
+
+
+
+    bool isSignalDisplayEnabled() const { return signalDisplayEnabled; }
+    
+    void setSignalDisplayEnabled(bool shouldBeEnabled)
+    {
+        signalDisplayEnabled = shouldBeEnabled;
+    }
+    
+	String getNonExistentId(String id, StringArray& usedIds) const;
+
+	
+
 private:
 
+	String initialId;
+
+	void checkId(const Identifier& id, const var& newValue);
+
+	valuetree::PropertyListener idGuard;
+
+    bool signalDisplayEnabled = false;
+    
 	Array<std::function<bool()>> postInitFunctions;
 
 	ModValue networkModValue;
@@ -967,6 +1002,8 @@ private:
 
 	const bool isPoly;
 
+	CachedValue<bool> hasTailProperty;
+
 	snex::Types::DllBoundaryTempoSyncer tempoSyncer;
 	snex::Types::PolyHandler polyHandler;
 
@@ -986,13 +1023,15 @@ private:
 		valuetree::RecursiveTypedChildListener deleteChecker;
 	};
 
+    bool initialised = false;
+    
 	ScopedPointer<SelectionUpdater> selectionUpdater;
 
 	OwnedArray<NodeFactory> ownedFactories;
 
 	Array<WeakReference<NodeFactory>> nodeFactories;
 
-	String getNonExistentId(String id, StringArray& usedIds) const;
+	
 
 	valuetree::RecursivePropertyListener idUpdater;
 	valuetree::RecursiveTypedChildListener exceptionResetter;
@@ -1027,10 +1066,10 @@ private:
 
 		void setParameter(int index, float newValue) override
 		{
-			if (isPositiveAndBelow(index, n.numParameters))
+			if (auto p = n.getParameter(index))
 			{
 				parameterValues[index] = newValue;
-				n.parameterFunctions[index](n.parameterObjects[index], (double)newValue);
+				p->callback.call(newValue);
 			}
 		}
 
@@ -1048,14 +1087,18 @@ private:
 
 		void prepare(PrepareSpecs ps)
 		{
-			dll->clearError();
+			if(dll != nullptr)
+				dll->clearError();
 
 			n.prepare(ps);
 
-			auto e = dll->getError();
+			if (dll != nullptr)
+			{
+				auto e = dll->getError();
 
-			if (!e.isOk())
-				throw e;
+				if (!e.isOk())
+					throw e;
+			}
 
 			n.reset();
 		}
@@ -1093,10 +1136,13 @@ private:
 			}
 		}
 
+		void init(dll::StaticLibraryHostFactory* staticLibrary);
+
 		void init(dll::ProjectDll::Ptr dllToUse);
 
 		bool hashMatches = false;
-		float parameterValues[16];
+
+		float parameterValues[OpaqueNode::NumMaxParameters];
 		DspNetwork& network;
 		dll::ProjectDll::Ptr dll;
 		OpaqueNode n;
@@ -1114,8 +1160,8 @@ struct OpaqueNetworkHolder
 
 	bool isPolyphonic() const { return false; }
 
-	HISE_EMPTY_INITIALISE;
-	HISE_EMPTY_PROCESS_SINGLE;
+	SN_EMPTY_INITIALISE;
+	
 
 	OpaqueNetworkHolder()
 	{
@@ -1145,6 +1191,20 @@ struct OpaqueNetworkHolder
 	void reset()
 	{
 		ownedNetwork->reset();
+	}
+
+	template <typename FrameDataType> void processFrame(FrameDataType& d)
+	{
+		// this might be the most inefficient code ever but we need
+		// to allow frame based processing of wrapped networks
+		float* channels[NUM_MAX_CHANNELS];
+
+		for (int i = 0; i < d.size(); i++)
+			channels[i] = d.begin() + i;
+
+		ProcessDataDyn pd(channels, 1, d.size());
+
+		ownedNetwork->process(pd);
 	}
 
 	void prepare(PrepareSpecs ps)
@@ -1346,6 +1406,8 @@ struct DspNetworkListeners
 		{
 			auto saveCopy = network->getValueTree().createCopy();
 
+			DspNetworkListeners::PatchAutosaver::removeDanglingConnections(saveCopy);
+
 			cppgen::ValueTreeIterator::forEach(saveCopy, snex::cppgen::ValueTreeIterator::IterationType::Forward, stripValueTree);
 
 			auto xml = saveCopy.createXml();
@@ -1386,39 +1448,9 @@ struct DspNetworkListeners
 
 	public:
 
-		static bool stripValueTree(ValueTree& v)
-		{
-			// Remove all child nodes from a project node
-			// (might be a leftover from the extraction process)
-			if (v.getType() == PropertyIds::Node && v[PropertyIds::FactoryPath].toString().startsWith("project"))
-			{
-				v.removeChild(v.getChildWithName(PropertyIds::Nodes), nullptr);
+		static void removeDanglingConnections(ValueTree& v);
 
-				for (auto p : v.getChildWithName(PropertyIds::Parameters))
-					p.removeChild(p.getChildWithName(PropertyIds::Connections), nullptr);
-			}
-
-			auto propChild = v.getChildWithName(PropertyIds::Properties);
-
-			// Remove all properties with the default value
-			for (int i = 0; i < propChild.getNumChildren(); i++)
-			{
-				if (removePropIfDefault(propChild.getChild(i), PropertyIds::IsVertical, 1))
-					propChild.removeChild(i--, nullptr);
-			}
-
-			removeIfNoChildren(propChild);
-
-			for (auto id : PropertyIds::Helpers::getDefaultableIds())
-				removeIfDefault(v, id, PropertyIds::Helpers::getDefaultValue(id));
-
-			removeIfDefined(v, PropertyIds::Value, PropertyIds::Automated);
-
-			removeIfNoChildren(v.getChildWithName(PropertyIds::Bookmarks));
-			removeIfNoChildren(v.getChildWithName(PropertyIds::ModulationTargets));
-
-			return false;
-		}
+		static bool stripValueTree(ValueTree& v);
 
 		File d;
 	};

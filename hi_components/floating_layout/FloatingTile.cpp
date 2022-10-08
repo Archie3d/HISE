@@ -161,7 +161,7 @@ void FloatingTilePopup::rebuildBoxPath()
 
 	shadowImage = Image(Image::ARGB, fb.getWidth(), fb.getHeight(), true);
 	Graphics g2(shadowImage);
-	g2.setColour(Colour(JUCE_LIVE_CONSTANT(Colour(0x32000000))));
+	g2.setColour(Colour(JUCE_LIVE_CONSTANT_OFF(Colour(0x32000000))));
 	g2.fillRect(bb);
 	gin::applyStackBlur(shadowImage, 3);
 }
@@ -352,6 +352,8 @@ Identifier FloatingTile::LayoutData::getDefaultablePropertyId(int index) const
 	RETURN_DEFAULT_PROPERTY_ID(index, LayoutDataIds::Visible, "Visible");
 	RETURN_DEFAULT_PROPERTY_ID(index, LayoutDataIds::MinSize, "MinSize");
     RETURN_DEFAULT_PROPERTY_ID(index, LayoutDataIds::ForceShowTitle, "ForceShowTitle");
+	RETURN_DEFAULT_PROPERTY_ID(index, LayoutDataIds::FocusKeyPress, "FocusKeyPress");
+	RETURN_DEFAULT_PROPERTY_ID(index, LayoutDataIds::FoldKeyPress, "FoldKeyPress");
 
 	jassertfalse;
 
@@ -481,69 +483,15 @@ void FloatingTile::ResizeButton::buttonClicked(Button* )
 FloatingTile::FoldButton::FoldButton() :
 	ShapeButton("Fold", Colours::white.withAlpha(0.2f), Colours::white.withAlpha(0.8f), Colours::white.withAlpha(0.8f))
 {
+	setWantsKeyboardFocus(false);
 	addListener(this);
 }
 
 void FloatingTile::FoldButton::buttonClicked(Button* )
 {
 	auto pc = findParentComponentOfClass<FloatingTile>();
-	
-    if(pc->getParentContainer()->getNumVisibleComponents() == 1)
-    {
-        pc = pc->getParentContainer()->getParentShell();
-        
-        while(pc != nullptr && !pc->canBeFolded())
-        {
-            auto c = pc->getParentContainer();
-            
-            if(c == nullptr)
-                return;
-            
-            pc = c->getParentShell();
-        }
-        
-        if(pc == nullptr)
-            return;
-    }
-    
-	if (!pc->canBeFolded())
-		return;
 
-	pc->setFolded(!pc->isFolded());
-    
-	if (auto cl = dynamic_cast<ResizableFloatingTileContainer*>(pc->getParentContainer()))
-	{
-        auto numVisible = pc->getParentContainer()->getNumVisibleAndResizableComponents();
-        auto aboutToClose = pc->isFolded();
-        auto isAbsolute = pc->getLayoutData().isAbsolute();
-        
-        auto shouldOpenOther = aboutToClose && numVisible == 0 && !isAbsolute;
-        
-        if(shouldOpenOther)
-        {
-            for(int i = 0; i < cl->getNumComponents(); i++)
-            {
-                auto c = cl->getComponent(i);
-                
-                if(c == pc)
-                    continue;
-                
-                auto& l = c->getLayoutData();
-                
-                if(l.isAbsolute())
-                    continue;
-                
-                if(l.isFolded())
-                {
-                    c->setFolded(false);
-                    break;
-                }
-            }
-        }
-        
-		cl->enableAnimationForNextLayout();
-		cl->refreshLayout();
-	}
+	pc->toggleFold();
 }
 
 FloatingTile::ParentType FloatingTile::getParentType() const
@@ -582,6 +530,8 @@ FloatingTile::FloatingTile(MainController* mc_, FloatingTileContainer* parent, v
 	addAndMakeVisible(resizeButton = new ResizeButton());
 
 	//layoutIcon.loadPathFromData(ColumnIcons::layoutIcon, sizeof(ColumnIcons::layoutIcon));
+
+
 
 	setContent(data);
 }
@@ -1185,6 +1135,7 @@ void FloatingTile::resized()
 	if (content.get() == nullptr)
 		return;
 
+	setWantsKeyboardFocus(getRootFloatingTile() == this);
 	
 	LayoutHelpers::setContentBounds(this);
 
@@ -1279,6 +1230,60 @@ double FloatingTile::getCurrentSizeInContainer()
 		else
 			return layoutData.getCurrentSize();
 	}
+}
+
+bool FloatingTile::keyPressed(const KeyPress& key)
+{
+	if (getRootFloatingTile() != this)
+		return false;
+
+	return forEach<FloatingTileContent>([key](FloatingTileContent* c)
+	{
+		if (!c->getParentShell()->isShowing())
+			return false;
+
+		if (auto t = dynamic_cast<FloatingTabComponent*>(c))
+		{
+            auto ck = t->getCycleKeyPress();
+            
+            if(ck.isValid())
+            {
+                auto cycleKey = TopLevelWindowWithKeyMappings::getFirstKeyPress(t, ck);
+                
+                if (cycleKey == key)
+                {
+                    int numTabs = t->getNumTabs();
+                    auto newIndex = (t->getCurrentTabIndex() + 1) % numTabs;
+                    t->setCurrentTabIndex(newIndex);
+                    dynamic_cast<Component*>(t)->grabKeyboardFocusAsync();
+                    return true;
+                }
+            }
+		};
+
+
+		auto& ld = c->getParentShell()->getLayoutData();
+		auto k = ld.getFoldKeyPress(c->getParentShell());
+		auto fk = ld.getFocusKeyPress(c->getParentShell());
+
+
+
+		if (fk.isValid() && fk == key)
+		{
+			dynamic_cast<Component*>(c)->grabKeyboardFocusAsync();
+			return true;
+		}
+
+		if (k.isValid() && k == key)
+		{
+			if (auto displayedTile = c->getParentShell()->toggleFold())
+				displayedTile->grabKeyboardFocusAsync();
+			
+			return true;
+		}
+
+		return false;
+	});
 }
 
 const FloatingTileContent* FloatingTile::getCurrentFloatingPanel() const
@@ -1844,6 +1849,71 @@ bool FloatingTile::isSwappable() const
 
 }
 
+hise::FloatingTile* FloatingTile::toggleFold()
+{
+	auto pc = this;
+
+	if (pc->getParentContainer()->getNumVisibleComponents() == 1)
+	{
+		pc = pc->getParentContainer()->getParentShell();
+
+		while (pc != nullptr && !pc->canBeFolded())
+		{
+			auto c = pc->getParentContainer();
+
+			if (c == nullptr)
+				return nullptr;
+
+			pc = c->getParentShell();
+		}
+
+		if (pc == nullptr)
+			return nullptr;
+	}
+
+	if (!pc->canBeFolded())
+		return nullptr;
+
+	pc->setFolded(!pc->isFolded());
+
+	if (auto cl = dynamic_cast<ResizableFloatingTileContainer*>(pc->getParentContainer()))
+	{
+		auto numVisible = pc->getParentContainer()->getNumVisibleAndResizableComponents();
+		auto aboutToClose = pc->isFolded();
+		auto isAbsolute = pc->getLayoutData().isAbsolute();
+
+		auto shouldOpenOther = aboutToClose && numVisible == 0 && !isAbsolute;
+
+		if (shouldOpenOther)
+		{
+			for (int i = 0; i < cl->getNumComponents(); i++)
+			{
+				auto c = cl->getComponent(i);
+
+				if (c == pc)
+					continue;
+
+				auto& l = c->getLayoutData();
+
+				if (l.isAbsolute())
+					continue;
+
+				if (l.isFolded())
+				{
+					c->setFolded(false);
+					pc = c;
+					break;
+				}
+			}
+		}
+
+		cl->enableAnimationForNextLayout();
+		cl->refreshLayout();
+	}
+
+	return pc;
+}
+
 void FloatingTile::refreshFixedSizeForNewContent()
 {
 	int fixedSize = getCurrentFloatingPanel()->getFixedSizeForOrientation();
@@ -2113,6 +2183,12 @@ juce::Path FloatingTilePopup::Factory::createPath(const String& url) const
 
 
 	return path;
+}
+
+
+const Identifier FloatingTileHelpers::getTileID(FloatingTile* parent)
+{
+	return parent->getLayoutData().getID();
 }
 
 } // namespace hise

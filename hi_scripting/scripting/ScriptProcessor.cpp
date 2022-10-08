@@ -163,6 +163,10 @@ void ProcessorWithScriptingContent::controlCallback(ScriptingApi::Content::Scrip
 			sp->repaintWrapped();
 		}
 	}
+	else if (auto customAuto = component->getCustomAutomation())
+	{
+		customAuto->call((float)controllerValue);
+	}
 	else if (auto callback = component->getCustomControlCallback())
 	{
 		if (MessageManager::getInstance()->isThisTheMessageThread())
@@ -321,11 +325,22 @@ int ProcessorWithScriptingContent::getNumScriptParameters() const
 
 void ProcessorWithScriptingContent::restoreContent(const ValueTree &restoredState)
 {
-	restoredContentValues = restoredState.getChildWithName("Content");
+	auto& uph = getMainController_()->getUserPresetHandler();
 
-	if (content.get() != nullptr)
+	if (uph.isUsingCustomDataModel())
 	{
-		content->restoreFromValueTree(restoredContentValues);
+		if (uph.isUsingPersistentObject())
+		{
+			restoredContentValues = restoredState;
+			getMainController_()->getUserPresetHandler().loadCustomValueTree(restoredState);
+		}
+	}
+	else
+	{
+		restoredContentValues = restoredState.getChildWithName("Content");
+
+		if (content.get() != nullptr)
+			content->restoreFromValueTree(restoredContentValues);
 	}
 }
 
@@ -364,6 +379,31 @@ void FileChangeListener::setFileResult(const File &file, Result r)
 Result FileChangeListener::getWatchedResult(int index)
 {
 	return watchers[index]->getResult();
+}
+
+juce::CodeDocument::Position FileChangeListener::getLastPosition(CodeDocument& docToLookFor) const
+{
+	for (const auto& pos : lastPositions)
+	{
+		if (pos.getOwner() == &docToLookFor)
+			return pos;
+	}
+
+	return CodeDocument::Position(docToLookFor, 0);
+}
+
+void FileChangeListener::setWatchedFilePosition(CodeDocument::Position& newPos)
+{
+	for (auto& p : lastPositions)
+	{
+		if (p.getOwner() == newPos.getOwner())
+		{
+			p = newPos;
+			return;
+		}
+	}
+
+	lastPositions.add(newPos);
 }
 
 File FileChangeListener::getWatchedFile(int index) const
@@ -851,8 +891,28 @@ JavascriptProcessor::SnippetResult JavascriptProcessor::compileInternal()
 
 	const bool saveThisContent = lastCompileWasOK && content != nullptr && !useStoredContentData;
 
-	if (saveThisContent) 
-		thisAsScriptBaseProcessor->restoredContentValues = content->exportAsValueTree();
+	auto& uph = thisAsScriptBaseProcessor->getMainController_()->getUserPresetHandler();
+
+    bool useCustomPreset = false;
+    
+    if(auto asJmp = dynamic_cast<JavascriptMidiProcessor*>(this))
+    {
+        useCustomPreset = asJmp->isFront() && uph.isUsingCustomDataModel();
+    }
+    
+	if (saveThisContent)
+	{
+		if (useCustomPreset)
+		{
+			if (uph.isUsingPersistentObject())
+			{
+				thisAsScriptBaseProcessor->restoredContentValues = ValueTree("Content");
+				thisAsScriptBaseProcessor->restoredContentValues.addChild(uph.createCustomValueTree("data"), -1, nullptr);
+			}
+		}
+		else
+			thisAsScriptBaseProcessor->restoredContentValues = content->exportAsValueTree();
+	}
 
 	auto thisAsProcessor = dynamic_cast<Processor*>(this);
 
@@ -941,7 +1001,27 @@ JavascriptProcessor::SnippetResult JavascriptProcessor::compileInternal()
 
 	try
 	{
-		content->restoreAllControlsFromPreset(thisAsScriptBaseProcessor->restoredContentValues);
+		if (useCustomPreset)
+		{
+			// We need to reinitialise the automation ID property here because
+			// it might not find the automation data before
+			for (int i = 0; i < getContent()->getNumComponents(); i++)
+			{
+				auto sc = getContent()->getComponent(i);
+				
+				auto id = sc->getIdFor(ScriptComponent::Properties::automationId);
+				auto idValue = sc->getScriptObjectProperty(id);
+
+				sc->setScriptObjectPropertyWithChangeMessage(id, idValue, sendNotificationAsync);
+			}
+
+			if (uph.isUsingPersistentObject())
+			{
+				uph.loadCustomValueTree(thisAsScriptBaseProcessor->restoredContentValues);
+			}
+		}
+		else
+			content->restoreAllControlsFromPreset(thisAsScriptBaseProcessor->restoredContentValues);
 	}
 	catch (String& s)
 	{
@@ -971,6 +1051,8 @@ JavascriptProcessor::SnippetResult JavascriptProcessor::compileInternal()
 void JavascriptProcessor::compileScript(const ResultFunction& rf /*= ResultFunction()*/)
 {
     inplaceValues.clearQuick();
+
+	clearCallableObjects();
     
 	auto f = [rf](Processor* p)
 	{
@@ -1006,6 +1088,8 @@ void JavascriptProcessor::setupApi()
 {
 	clearFileWatchers();
 
+    sendClearMessage();
+    
 	dynamic_cast<ProcessorWithScriptingContent*>(this)->getScriptingContent()->cleanJavascriptObjects();
 
 	scriptEngine = new HiseJavascriptEngine(this);
@@ -1488,13 +1572,33 @@ void JavascriptProcessor::stuffAfterCompilation(const SnippetResult& result)
 
 	mainController->getScriptComponentEditBroadcaster()->clearSelection(sendNotification);
 
-	if (lastCompileWasOK)
+	if (lastCompileWasOK && lastOptimisationReport.isNotEmpty())
 	{
+		debugToConsole(dynamic_cast<Processor*>(this), lastOptimisationReport);
+
 		String x;
 		mergeCallbacksToScript(x);
 	}
 
 	mainController->checkAndAbortMessageThreadOperation();
+
+#if USE_BACKEND
+	if (isConnectedToExternalFile())
+	{
+		auto shouldSave = (bool)GET_HISE_SETTING(dynamic_cast<Processor*>(this), HiseSettings::Scripting::SaveConnectedFilesOnCompile);
+
+		if (shouldSave)
+		{
+			String x;
+			mergeCallbacksToScript(x);
+		
+			const File f = GET_PROJECT_HANDLER(dynamic_cast<const Processor*>(this)).getFilePath(connectedFileReference, ProjectHandler::SubDirectories::Scripts);
+
+			f.replaceWithText(x);
+		}
+	}
+#endif
+	
 
 	clearFileWatchers();
 
@@ -1613,6 +1717,9 @@ JavascriptThreadPool::JavascriptThreadPool(MainController* mc) :
 	highPriorityQueue(2048),
 	compilationQueue(128),
 	deferredPanels(1024),
+#if USE_BACKEND
+    replQueue(128),
+#endif
 	globalServer(new GlobalServer(mc))
 {
 	startThread(6);
@@ -1727,10 +1834,13 @@ Result JavascriptThreadPool::executeQueue(const Task::Type& t, PendingCompilatio
 	{
 		CompilationTask ct;
 
+		
+
 		allowSleep = true;
 
 		while (compilationQueue.pop(ct))
 		{
+            SimpleReadWriteLock::ScopedWriteLock sl(getLookAndFeelRenderLock());
 			SuspendHelpers::ScopedTicket ticket;
 
 			lowPriorityQueue.clear();
@@ -1739,29 +1849,52 @@ Result JavascriptThreadPool::executeQueue(const Task::Type& t, PendingCompilatio
 			killVoicesAndExtendTimeOut(ct.getFunction().getProcessor());
 
 			r = ct.call();
+
 			pendingCompilations.addIfNotAlreadyThere(ct.getFunction().getProcessor());
 		}
 
-		
-
 		return r;
 	}
+    case Task::ReplEvaluation:
+    {
+        r = executeQueue(Task::Compilation, pendingCompilations);
+        
+#if USE_BACKEND
+        CallbackTask hpt;
+
+        while (r.wasOk() && replQueue.pop(hpt))
+        {
+            if (alreadyCompiled(hpt))
+                continue;
+
+            r = hpt.call();
+        }
+#endif
+
+        return r;
+    }
 	case Task::HiPriorityCallbackExecution:
 	{
-		r = executeQueue(Task::Compilation, pendingCompilations);
+#if USE_BACKEND
+		r = executeQueue(Task::ReplEvaluation, pendingCompilations);
+#else
+        r = executeQueue(Task::Compilation, pendingCompilations);
+#endif
 
 		CallbackTask hpt;
 
-		while (highPriorityQueue.pop(hpt))
+		while (r.wasOk() && highPriorityQueue.pop(hpt))
 		{
 			jassert(hpt.getFunction().isHiPriority());
 
 			if (alreadyCompiled(hpt))
 				continue;
 
-			
 			r = hpt.call();
 		}
+
+		if (!r.wasOk())
+			lowPriorityQueue.clear();
 
 		return r;
 	}
@@ -1771,9 +1904,12 @@ Result JavascriptThreadPool::executeQueue(const Task::Type& t, PendingCompilatio
 
 		CallbackTask lpt;
 
-		while (lowPriorityQueue.pop(lpt))
+		while (r.wasOk() && lowPriorityQueue.pop(lpt))
 		{
-			ScopedLock sl(lookAndFeelRenderLock);
+            // We're trying to leave this unlocked here as the
+            // localised inline function scope might resolve all
+            // multithreading issues (???)
+			//SimpleReadWriteLock::ScopedWriteLock sl(getLookAndFeelRenderLock());
 
 			jassert(!lpt.getFunction().isHiPriority());
 
@@ -1783,16 +1919,26 @@ Result JavascriptThreadPool::executeQueue(const Task::Type& t, PendingCompilatio
 			r = lpt.call();
 		}
 
+		if (!r.wasOk())
+			lowPriorityQueue.clear();
+
 		WeakReference<ScriptingApi::Content::ScriptPanel> sp;
 
-		while (deferredPanels.pop(sp))
+		if (r.wasOk())
 		{
-			ScopedValueSetter<bool> svs(busy, true);
-			
-			if(sp.get() != nullptr)
-				sp->repaint();
+			while (deferredPanels.pop(sp))
+			{
+				ScopedValueSetter<bool> svs(busy, true);
+
+				if (sp.get() != nullptr)
+					sp->repaint();
+			}
 		}
-		
+		else
+		{
+			deferredPanels.clear();
+		}
+
 		return r;
 	}
 	default:
@@ -1809,8 +1955,13 @@ void JavascriptThreadPool::run()
 		Array<WeakReference<JavascriptProcessor>> compiledProcessors;
 		compiledProcessors.ensureStorageAllocated(16);
 
-		executeQueue(Task::LowPriorityCallbackExecution, compiledProcessors);
+		auto r = executeQueue(Task::LowPriorityCallbackExecution, compiledProcessors);
 		
+		if (!r.wasOk() && r.getErrorMessage() != "Engine is dangling")
+		{
+			debugError(getMainController()->getMainSynthChain(), r.getErrorMessage());
+		}
+
 		wait(500);
 	}
 }
@@ -1826,11 +1977,6 @@ void JavascriptThreadPool::killVoicesAndExtendTimeOut(JavascriptProcessor* jp, i
 	{
 		engine->extendTimeout(milliseconds);
 	}
-}
-
-juce::CriticalSection& JavascriptThreadPool::getLookAndFeelRenderLock()
-{
-	return lookAndFeelRenderLock;
 }
 
 void JavascriptThreadPool::pushToQueue(const Task::Type& t, JavascriptProcessor* p, const Task::Function& f)

@@ -392,6 +392,7 @@ struct DspNetworkCompileExporter : public hise::DialogWindowWithBackgroundThread
 		OK,
 		NoNetwork,
 		NonCompiledInclude,
+        CppGenError,
 		UninitialisedProperties
 	};
 
@@ -404,6 +405,19 @@ struct DspNetworkCompileExporter : public hise::DialogWindowWithBackgroundThread
 	File getBuildFolder() const override;
 
 private:
+
+	enum CppFileLocationType
+	{
+		UnknownFileType,
+		CompiledNetworkFile,
+		ThirdPartyFile,
+		ThirdPartySourceFile,
+		EmbeddedDataFile
+	};
+
+	void writeDebugFileAndShowSolution();
+
+	CppFileLocationType getLocationType(const File& f) const;
 
 	DspNetwork* getNetwork();
 
@@ -431,6 +445,7 @@ private:
 	String errorMessage;
 
 	Array<File> includedFiles;
+	Array<File> includedThirdPartyFiles;
 	
 
 	File getSourceDirectory(bool isDllMainFile) const;

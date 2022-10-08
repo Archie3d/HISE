@@ -49,7 +49,10 @@ class BackendProcessorEditor;
 
 
 
+
+
 class BackendRootWindow : public TopLevelWindowWithOptionalOpenGL,
+						  public TopLevelWindowWithKeyMappings,
 						  public AudioProcessorEditor,
 						  public BackendCommandTarget,
                           public snex::ui::WorkbenchManager::WorkbenchChangeListener,
@@ -59,7 +62,8 @@ class BackendRootWindow : public TopLevelWindowWithOptionalOpenGL,
 						  public ComponentWithBackendConnection,
 						  public DragAndDropContainer,
 						  public ComponentWithHelp::GlobalHandler,
-						  public PeriodicScreenshotter::Holder
+						  public PeriodicScreenshotter::Holder,
+						  public MainController::LockFreeDispatcher::PresetLoadListener
 {
 public:
 
@@ -68,6 +72,13 @@ public:
 	~BackendRootWindow();
 
 	bool isFullScreenMode() const;
+
+	File getKeyPressSettingFile() const override
+	{
+		return ProjectHandler::getAppDataDirectory().getChildFile("KeyPressMapping.xml");
+	}
+
+	void initialiseAllKeyPresses() override;
 
 	void paint(Graphics& g) override
 	{
@@ -153,6 +164,8 @@ public:
 
 	void loadNewContainer(const File &f);
 	
+	void newHisePresetLoaded() override;
+
 	FloatingTile* getRootFloatingTile() override { return floatingRoot; }
 
 	MainController::ProcessorChangeHandler &getModuleListNofifier() { return getMainSynthChain()->getMainController()->getProcessorChangeHandler(); }
@@ -206,11 +219,15 @@ public:
 
 	void paintOverChildren(Graphics& g) override;
 
+	
+
 private:
+
+	
 
 	bool learnMode = false;
 
-	LookAndFeel_V3 globalLookAndFeel;
+	GlobalHiseLookAndFeel globalLookAndFeel;
 
 	OwnedArray<FloatingTileDocumentWindow> popoutWindows;
 

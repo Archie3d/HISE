@@ -53,10 +53,14 @@ public:
 
 		static bool matchesInput(const String& input, const String& code)
 		{
-			if (input.length() == 1)
+            auto inputLength = input.length();
+            
+			if (inputLength == 1)
 				return code.toLowerCase().startsWith(input.toLowerCase());
-			else
-				return FuzzySearcher::fitsSearch(input.toLowerCase(), code.toLowerCase(), JUCE_LIVE_CONSTANT(0.6));
+			else if (inputLength <= 3)
+                return code.toLowerCase().contains(input.toLowerCase());
+            else
+				return FuzzySearcher::fitsSearch(input.toLowerCase(), code.toLowerCase(), JUCE_LIVE_CONSTANT_OFF(0.85));
 		}
 
 		virtual bool equals(const Token* other) const
@@ -177,6 +181,12 @@ public:
 			if (assignedCollection != nullptr)
 				assignedCollection->signalRebuild();
 		}
+        
+        void signalClear(NotificationType n)
+        {
+            if(assignedCollection != nullptr)
+                assignedCollection->signalClear(n);
+        }
 
 		WeakReference<TokenCollection> assignedCollection;
 	};
@@ -212,6 +222,20 @@ public:
 		startThread();
 	}
 
+    void signalClear(NotificationType n)
+    {
+        SimpleReadWriteLock::ScopedWriteLock sl(buildLock);
+        dirty = false;
+        tokens.clear();
+        cancelPendingUpdate();
+        
+        for(auto l: listeners)
+        {
+            if(l != nullptr)
+                l->tokenListWasRebuild();
+        }
+    }
+    
 	void run() override
 	{
 		dirty = true;
@@ -373,7 +397,13 @@ public:
             if(!startsWith1 && startsWith2)
                 return 1;
             
-            return 0;
+            if(first->priority > second->priority)
+                return -1;
+            
+            if(second->priority > first->priority)
+                return 1;
+            
+            return first->tokenContent.compareIgnoreCase(second->tokenContent);
         }
         
         String exactSearchTerm;

@@ -73,8 +73,8 @@ template <typename T, int NV> struct jwrapper
 			obj.prepare(jps);
 	}
 
-	HISE_EMPTY_HANDLE_EVENT;
-	HISE_EMPTY_INITIALISE;
+	SN_EMPTY_HANDLE_EVENT;
+	SN_EMPTY_INITIALISE;
 	
 	template <typename ProcessDataType> void process(ProcessDataType& data)
 	{
@@ -119,6 +119,12 @@ protected:
 */
 template <bool NormalisedModulation=true> struct jmod: public data::display_buffer_base<true>
 {
+	jmod(const Identifier& id)
+	{
+		if(!NormalisedModulation)
+			cppgen::CustomNodeProperties::addNodeIdManually(id, PropertyIds::UseUnnormalisedModulation);
+	}
+
 	virtual ~jmod() {};
 
 	static constexpr bool isNormalisedModulation() { return NormalisedModulation; };
@@ -142,6 +148,10 @@ template <bool NormalisedModulation=true> struct jmod: public data::display_buff
 struct jcompressor : public jdsp::base::jwrapper<juce::dsp::Compressor<float>, 1>,
 					 public jdsp::base::jmod<true>
 {
+	jcompressor() :
+		jmod<true>(getStaticId())
+	{};
+
 	SNEX_NODE(jcompressor);
 
 	template <int P> void setParameter(double v)
@@ -151,7 +161,7 @@ struct jcompressor : public jdsp::base::jwrapper<juce::dsp::Compressor<float>, 1
 			if (P == 0)
 				obj.setThreshold(v);
 			if (P == 1)
-				obj.setRatio(v);
+				obj.setRatio(jmax(1.0, v));
 			if (P == 2)
 				obj.setAttack(v);
 			if (P == 3)
@@ -176,7 +186,7 @@ struct jcompressor : public jdsp::base::jwrapper<juce::dsp::Compressor<float>, 1
 };
 
 struct jlinkwitzriley : public base::jwrapper<juce::dsp::LinkwitzRileyFilter<float>, 1>,
-						public data::base,
+						public data::filter_base,
 						public hise::ComplexDataUIUpdaterBase::EventListener
 {
 	SNEX_NODE(jlinkwitzriley);
@@ -192,7 +202,10 @@ struct jlinkwitzriley : public base::jwrapper<juce::dsp::LinkwitzRileyFilter<flo
 		for (auto& o : objects)
 		{
 			if (P == 0)
-				o.setCutoffFrequency(v);
+			{
+				if(std::isfinite(v) && v > 20.0)
+					o.setCutoffFrequency(v);
+			}
 			if (P == 1)
 				o.setType((JuceDspType::Type)(int)v);
 		}
@@ -200,8 +213,11 @@ struct jlinkwitzriley : public base::jwrapper<juce::dsp::LinkwitzRileyFilter<flo
 		sendCoefficientUpdateMessage();
 	}
 
-	IIRCoefficients getDisplayCoefficients() const
+	IIRCoefficients getApproximateCoefficients() const override
 	{
+        if(sr == 0)
+            return {};
+        
 		auto& o = objects.getFirst();
 
 		switch (o.getType())
@@ -223,7 +239,7 @@ struct jlinkwitzriley : public base::jwrapper<juce::dsp::LinkwitzRileyFilter<flo
 				if (sr > 0.0)
 					fd->setSampleRate(sr);
 
-				fd->setCoefficients(getDisplayCoefficients());
+				fd->setCoefficients(this, getApproximateCoefficients());
 			}
 		}
 	}
@@ -239,11 +255,14 @@ struct jlinkwitzriley : public base::jwrapper<juce::dsp::LinkwitzRileyFilter<flo
 	void setExternalData(const ExternalData& d, int index) override
 	{
 		if (this->externalData.obj != nullptr)
+		{
 			d.obj->getUpdater().removeEventListener(this);
+			
+		}
 
 		jassert(d.dataType == ExternalData::DataType::FilterCoefficients);
 
-		base::setExternalData(d, index);
+		filter_base::setExternalData(d, index);
 
 		if (auto fd = dynamic_cast<FilterDataObject*>(d.obj))
 		{
@@ -283,14 +302,13 @@ template <int NV> struct jpanner : public base::jwrapper<juce::dsp::Panner<float
 	{
 		{
 			parameter::data p("Pan", { -1.0, 1.0 });
-
-			p.callback = parameter::inner<jpanner, 0>(*this);
+			registerCallback<0>(p);
 			p.setDefaultValue(0.0);
 			d.add(p);
 		}
 		{
 			parameter::data p("Rule");
-			p.callback = parameter::inner<jpanner, 1>(*this);
+			registerCallback<1>(p);
 			p.setParameterValueNames({ "Linear", "Balanced", "Sine3dB", "Sine4.5dB", "Sine6dB", "Sqrt3dB", "Sqrt4p5dB" });
 			p.setDefaultValue(1.0);
 			d.add(p);

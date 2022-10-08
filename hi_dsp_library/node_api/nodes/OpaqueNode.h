@@ -157,6 +157,14 @@ struct OpaqueNode
 		if constexpr (prototypes::check::isProcessingHiseEvent<T>::value)
 			shouldProcessHiseEvent = t->isProcessingHiseEvent();
 
+		if constexpr (prototypes::check::hasTail<T>::value)
+			hasTail_ = t->hasTail();
+
+		if constexpr (prototypes::check::getFixChannelAmount<typename T::ObjectType>::value)
+			numChannels = T::ObjectType::getFixChannelAmount();
+		else
+			numChannels = -1;
+
 		if constexpr (prototypes::check::handleModulation<T>::value)
 		{
 			modFunc = prototypes::static_wrappers<T>::handleModulation;
@@ -224,7 +232,12 @@ struct OpaqueNode
 
 	bool handleModulation(double& d);
 
-	void* getObjectPtr() const { return this->object.getObjectPtr(); }
+	void* getObjectPtr() const
+    {
+        auto obj = this->object.getObjectPtr();
+        jassert(obj != nullptr);
+        return obj;
+    }
 
 	mothernode* getObjectAsMotherNode() { return mnPtr; }
 
@@ -254,6 +267,8 @@ struct OpaqueNode
 
 	String getDescription() const { return description; }
 
+	bool hasTail() const { return hasTail_; }
+
 private:
 
 	String description;
@@ -267,6 +282,8 @@ private:
 	bool isPoly = false;
 	bool isPolyPossible = false;
 
+	bool hasTail_ = true;
+
 	prototypes::handleHiseEvent eventFunc = nullptr;
 	prototypes::destruct destructFunc = nullptr;
 	prototypes::prepare prepareFunc = nullptr;
@@ -278,15 +295,43 @@ private:
 	prototypes::setExternalData externalDataFunc = nullptr;
 	prototypes::handleModulation modFunc;
 
+	Array<parameter::data> parameters;
+
 public:
 
 	bool shouldProcessHiseEvent = false;
 	bool isNormalised = false;
-	span<parameter::pod, NumMaxParameters> parameters;
-	span<prototypes::setParameter, NumMaxParameters> parameterFunctions;
-	span<void*, NumMaxParameters> parameterObjects;
-	span<StringArray, NumMaxParameters> parameterNames;
 
+	parameter::data* getParameter(int index)
+	{
+		if (isPositiveAndBelow(index, numParameters))
+		{
+			return parameters.getRawDataPointer() + index;
+		}
+
+		return nullptr;
+	}
+
+	struct ParameterIterator
+	{
+		ParameterIterator(OpaqueNode& on_) :
+			on(on_)
+		{};
+
+		parameter::data* begin() const
+		{
+			return on.parameters.begin();
+		}
+
+		parameter::data* end() const
+		{
+			return on.parameters.end();
+		}
+
+		OpaqueNode& on;
+	};
+
+	int numChannels = -1;
 	int numParameters = 0;
 	int numDataObjects[(int)ExternalData::DataType::numDataTypes];
 };
@@ -307,6 +352,10 @@ namespace dll
 
 		virtual Error getError() const = 0;
 		virtual void clearError() const = 0;
+
+		virtual bool isThirdPartyNode(int index) const = 0;
+
+		virtual void deinitOpaqueNode(OpaqueNode* n) { }
 	};
 
 	/** A Factory that initialises the nodes using the templated OpaqueNode::create function.
@@ -339,6 +388,9 @@ namespace dll
 
 		int getNumDataObjects(int index, int dataTypeAsInt) const override;
 
+		/** We don't bother about whether it's a third party node or not in a static compiled plugin. */
+		bool isThirdPartyNode(int index) const override { return false; };
+
 		template <typename T, typename PolyT> void registerPolyNode()
 		{
 			registerNode<T>();
@@ -360,15 +412,15 @@ namespace dll
 		template <typename T> void registerNode()
 		{
 			Item i;
-			i.id = T::MetadataClass::getStaticId().toString();
-			i.isModNode = T::isModNode();
+			i.id = T::ObjectType::MetadataClass::getStaticId().toString();
+			i.isModNode = T::ObjectType::isModNode();
 			i.f = [](scriptnode::OpaqueNode* n) { n->create<T>(); };
 
-			i.numDataObjects[(int)ExternalData::DataType::Table] = T::NumTables;
-			i.numDataObjects[(int)ExternalData::DataType::SliderPack] = T::NumSliderPacks;
-			i.numDataObjects[(int)ExternalData::DataType::AudioFile] = T::NumAudioFiles;
-			i.numDataObjects[(int)ExternalData::DataType::FilterCoefficients] = T::NumFilters;
-			i.numDataObjects[(int)ExternalData::DataType::DisplayBuffer] = T::NumDisplayBuffers;
+			i.numDataObjects[(int)ExternalData::DataType::Table] = T::ObjectType::NumTables;
+			i.numDataObjects[(int)ExternalData::DataType::SliderPack] = T::ObjectType::NumSliderPacks;
+			i.numDataObjects[(int)ExternalData::DataType::AudioFile] = T::ObjectType::NumAudioFiles;
+			i.numDataObjects[(int)ExternalData::DataType::FilterCoefficients] = T::ObjectType::NumFilters;
+			i.numDataObjects[(int)ExternalData::DataType::DisplayBuffer] = T::ObjectType::NumDisplayBuffers;
 
 			items.add(i);
 		}
@@ -382,6 +434,10 @@ namespace dll
 		for creating / querying node specs. */
 	struct ProjectDll : public ReferenceCountedObject
 	{
+		// This is just used to check whether the dll is deprecated and needs to be recompiled...
+		// (It will be bumped whenever a breaking change into the DLL API is introduced)...
+		static constexpr int DllUpdateCounter = 1;
+
 		using Ptr = ReferenceCountedObjectPtr<ProjectDll>;
 
 		enum class ExportedFunction
@@ -395,6 +451,8 @@ namespace dll
 			GetNumDataObjects,
 			GetError,
 			ClearError,
+			IsThirdPartyNode,
+			GetDLLVersionCounter,
 			numFunctions
 		};
 
@@ -409,12 +467,16 @@ namespace dll
 		typedef int(*GetNumDataObjects)(int, int);
 		typedef Error(*GetError)();
 		typedef void(*ClearError)();
+		typedef bool(*IsThirdPartyNode)(int);
+		typedef int(*GetDllVersionCounter)();
 
 		int getWrapperType(int index) const;
 
 		int getNumNodes() const;
 
 		int getNumDataObjects(int nodeIndex, int dataTypeAsInt) const;
+
+		bool isThirdPartyNode(int nodeIndex) const;
 
 		String getNodeId(int index) const;
 
@@ -439,6 +501,8 @@ namespace dll
 
 		int getHash(int index) const;
 
+        File getDllFile() const { return loadedFile; }
+        
 	private:
 
 		void clearAllFunctions()
@@ -466,6 +530,7 @@ namespace dll
 			return func;
 		};
 
+        File loadedFile;
 		Result r;
 
 		void* functions[(int)ExportedFunction::numFunctions];
@@ -493,10 +558,14 @@ namespace dll
 		int getNumDataObjects(int index, int dataTypeAsInt) const override;
 		int getWrapperType(int index) const override;
 
+		bool isThirdPartyNode(int index) const override;
+
 		void clearError() const override;
 
 		Error getError() const override;
 		
+		void deinitOpaqueNode(scriptnode::OpaqueNode* n) override;
+
 	private:
 
 		ProjectDll::Ptr projectDll;

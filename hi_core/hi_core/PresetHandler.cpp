@@ -49,26 +49,8 @@ void UserPresetHelpers::saveUserPreset(ModulatorSynthChain *chain, const String&
 	}
 
 	if (!GET_PROJECT_HANDLER(chain).isActive()) return;
-
-	File userPresetDir = GET_PROJECT_HANDLER(chain).getSubDirectory(ProjectHandler::SubDirectories::UserPresets);
-
-#else
-
-    File userPresetDir;
-    
-    try
-    {
-        userPresetDir = FrontendHandler::getUserPresetDirectory();
-    }
-    catch(String& s)
-    {
-        chain->getMainController()->sendOverlayMessage(DeactiveOverlay::State::CriticalCustomErrorMessage, s);
-        return;
-    }
-
 #endif
-
-	
+    
 	File presetFile = File(targetFile);
 	
     String existingNote;
@@ -83,7 +65,6 @@ void UserPresetHelpers::saveUserPreset(ModulatorSynthChain *chain, const String&
 
 		presetFile.deleteFile();
 	}
-
 #else
 
 	if (presetFile.existsAsFile())
@@ -93,7 +74,6 @@ void UserPresetHelpers::saveUserPreset(ModulatorSynthChain *chain, const String&
 
 		presetFile.deleteFile();
 	}
-
 #endif
 	
 	if (!presetFile.existsAsFile())
@@ -131,12 +111,20 @@ juce::ValueTree UserPresetHelpers::createUserPreset(ModulatorSynthChain* chain)
 
 	if (auto sp = JavascriptMidiProcessor::getFirstInterfaceScriptProcessor(chain->getMainController()))
 	{
-		ValueTree v = sp->getScriptingContent()->exportAsValueTree();
-
-		v.setProperty("Processor", sp->getId(), nullptr);
-
 		preset = ValueTree("Preset");
-		preset.addChild(v, -1, nullptr);
+
+		if (chain->getMainController()->getUserPresetHandler().isUsingCustomDataModel())
+		{
+			auto v = chain->getMainController()->getUserPresetHandler().createCustomValueTree("Unused");
+			preset.addChild(v, -1, nullptr);
+		}
+		else
+		{
+			ValueTree v = sp->getScriptingContent()->exportAsValueTree();
+
+			v.setProperty("Processor", sp->getId(), nullptr);
+			preset.addChild(v, -1, nullptr);
+		}
 
 		auto modules = createModuleStateTree(chain);
 
@@ -149,8 +137,6 @@ juce::ValueTree UserPresetHelpers::createUserPreset(ModulatorSynthChain* chain)
 
 	ValueTree autoData = chain->getMainController()->getMacroManager().getMidiControlAutomationHandler()->exportAsValueTree();
 	ValueTree mpeData = chain->getMainController()->getMacroManager().getMidiControlAutomationHandler()->getMPEData().exportAsValueTree();
-
-	
 
 	preset.setProperty("Version", getCurrentVersionNumber(chain), nullptr);
 
@@ -210,15 +196,20 @@ juce::ValueTree UserPresetHelpers::createModuleStateTree(ModulatorSynthChain* ch
 
 	if (auto sp = JavascriptMidiProcessor::getFirstInterfaceScriptProcessor(chain->getMainController()))
 	{
-		for (auto id : sp->getListOfModuleIds())
+		for (auto ms : sp->getListOfModuleIds())
 		{
-			auto p = ProcessorHelpers::getFirstProcessorWithName(chain, id);
-			auto mTree = p->exportAsValueTree();
+			auto id = ms->id;
 
-			mTree.removeChild(mTree.getChildWithName("EditorStates"), nullptr);
-			mTree.removeChild(mTree.getChildWithName("EditorStates"), nullptr);
+			if (auto p = ProcessorHelpers::getFirstProcessorWithName(chain, id))
+			{
+				auto mTree = p->exportAsValueTree();
 
-			modules.addChild(mTree, -1, nullptr);
+				mTree.removeChild(mTree.getChildWithName("EditorStates"), nullptr);
+
+				ms->stripValueTree(mTree);
+
+				modules.addChild(mTree, -1, nullptr);
+			}
 		}
 	}
 
@@ -256,18 +247,48 @@ void UserPresetHelpers::restoreModuleStates(ModulatorSynthChain* chain, const Va
 
 	if (modules.isValid())
 	{
+		auto& md = chain->getMainController()->getUserPresetHandler().getStoredModuleData();
+
+		bool didSomething = false;
+
 		for (auto m : modules)
 		{
-			auto p = ProcessorHelpers::getFirstProcessorWithName(chain, m["ID"]);
+			didSomething = true;
+
+			auto id = m["ID"].toString();
+			auto p = ProcessorHelpers::getFirstProcessorWithName(chain, id);
 
 			if (p != nullptr)
 			{
-				auto copy = p->exportAsValueTree();
+				auto mcopy = m.createCopy();
 
-				if (p->getType().toString() == m["Type"].toString())
+				for (auto ms : md)
 				{
-					p->restoreFromValueTree(m);
+					if (ms->id == id)
+					{
+						ms->restoreValueTree(mcopy);
+						break;
+					}
 				}
+
+				if (p->getType().toString() == mcopy["Type"].toString())
+				{
+					p->restoreFromValueTree(mcopy);
+					p->sendPooledChangeMessage();
+				}
+			}
+		}
+
+		auto& uph = chain->getMainController()->getUserPresetHandler();
+
+		if (didSomething && uph.isUsingCustomDataModel())
+		{
+			auto numDataObjects = uph.getNumCustomAutomationData();
+
+			// We might need to update the custom automation data values.
+			for (int i = 0; i < numDataObjects; i++)
+			{
+				uph.getCustomAutomationData(i)->updateFromConnectionValue(0);
 			}
 		}
 	}
@@ -332,31 +353,7 @@ String UserPresetHelpers::getCurrentVersionNumber(ModulatorSynthChain* chain)
 #endif
 }
 
-File UserPresetHelpers::getUserPresetFile(ModulatorSynthChain *chain, const String &fileNameWithoutExtension)
-{
-#if USE_BACKEND
-    return GET_PROJECT_HANDLER(chain).getSubDirectory(ProjectHandler::SubDirectories::UserPresets).getChildFile(fileNameWithoutExtension + ".preset");
-#else
 
-	ignoreUnused(chain);
-
-    
-    File userPresetDir;
-    
-    try
-    {
-        userPresetDir = FrontendHandler::getUserPresetDirectory();
-    }
-    catch(String& s)
-    {
-        chain->getMainController()->sendOverlayMessage(DeactiveOverlay::State::CriticalCustomErrorMessage, s);
-        return File();
-    }
-    
-    
-	return userPresetDir.getChildFile(fileNameWithoutExtension + ".preset");
-#endif
-}
 
 ValueTree parseUserPreset(const File& f)
 {
@@ -1057,13 +1054,14 @@ void ProjectHandler::checkActiveProject()
 juce::File ProjectHandler::getAppDataRoot()
 {
 	const File::SpecialLocationType appDataDirectoryToUse = File::userApplicationDataDirectory;
-
+    
 #if JUCE_IOS
 	return File::getSpecialLocation(appDataDirectoryToUse).getChildFile("Application Support/");
 #elif JUCE_MAC
 
 
 #if ENABLE_APPLE_SANDBOX
+    ignoreUnused(appDataDirectoryToUse);
 	return File::getSpecialLocation(File::userMusicDirectory);
 #else
 	return File::getSpecialLocation(appDataDirectoryToUse).getChildFile("Application Support");
@@ -1333,6 +1331,42 @@ juce::File FrontendHandler::getAppDataDirectory()
 	return f;
 }
 
+juce::ValueTree FrontendHandler::getEmbeddedNetwork(const String& id)
+{
+	for (auto n : networks)
+	{
+		if (n["ID"].toString() == id)
+			return n;
+	}
+
+#if USE_FRONTEND
+	if (ScopedPointer<scriptnode::dll::FactoryBase> f = FrontendHostFactory::createStaticFactory())
+	{
+		// We need to look in the compiled networks and return a dummy ValueTree
+		int numNodes = f->getNumNodes();
+
+		for (int i = 0; i < numNodes; i++)
+		{
+			if (f->getId(i) == id)
+			{
+				ValueTree v(PropertyIds::Network);
+				v.setProperty(PropertyIds::ID, id, nullptr);
+
+				ValueTree r(PropertyIds::Node);
+				r.setProperty(PropertyIds::FactoryPath, "container.chain", nullptr);
+				r.setProperty(PropertyIds::ID, id, nullptr);
+				v.addChild(r, -1, nullptr);
+
+				return v;
+			}
+		}
+	}
+#endif
+
+	jassertfalse;
+	return {};
+}
+
 void FrontendHandler::loadSamplesAfterSetup()
 {
 	if (shouldLoadSamplesAfterSetup())
@@ -1441,7 +1475,7 @@ File FrontendHandler::getSampleLinkFile()
 
 
 
-File FrontendHandler::getUserPresetDirectory()
+File FrontendHandler::getUserPresetDirectory(bool getRedirect)
 {
 #if HISE_IOS
     
@@ -1483,9 +1517,9 @@ File FrontendHandler::getUserPresetDirectory()
     
 #else
     
-    
 	File presetDir = getAppDataDirectory().getChildFile("User Presets");
 	
+    return FileHandlerBase::getFolderOrRedirect(presetDir);
 
 	return presetDir;
     
@@ -1575,6 +1609,12 @@ juce::String FrontendHandler::getCompanyName()
 }
 
 juce::String FrontendHandler::getCompanyWebsiteName()
+{
+	jassertfalse;
+	return {};
+}
+
+juce::String FrontendHandler::getCompanyCopyright()
 {
 	jassertfalse;
 	return {};
@@ -2523,6 +2563,21 @@ juce::File FileHandlerBase::getLinkFile(const File &subDirectory)
 #endif
 }
 
+File FileHandlerBase::getFolderOrRedirect(const File& folder)
+{
+    auto lf = getLinkFile(folder);
+    
+    if(lf.existsAsFile())
+    {
+        auto rd = File(lf.loadFileAsString());
+        
+        if(rd.isDirectory())
+            return rd;
+    }
+    
+    return folder;
+}
+
 void FileHandlerBase::createLinkFile(SubDirectories dir, const File &relocation)
 {
 	File subDirectory = getRootFolder().getChildFile(getIdentifier(dir));
@@ -2536,6 +2591,9 @@ void FileHandlerBase::createLinkFileInFolder(const File& source, const File& tar
 
 	if (linkFile.existsAsFile())
 	{
+        if(linkFile.loadFileAsString() == target.getFullPathName())
+            return;
+        
 		if (!target.isDirectory())
 		{
 			linkFile.deleteFile();

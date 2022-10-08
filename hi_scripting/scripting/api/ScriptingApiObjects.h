@@ -85,6 +85,8 @@ public:
 
 	static Array<Identifier> getGlobalApiClasses();
 
+	static void loadPathFromData(Path& p, var data);
+
 	static PathStrokeType createPathStrokeType(var strokeType);
 
 #if USE_BACKEND
@@ -103,7 +105,7 @@ class ScriptCreatedComponentWrapper;
 class ScriptContentComponent;
 class ScriptedControlAudioParameter;
 class AudioProcessorWrapper;
-class SlotFX;
+class HotswappableProcessor;
 
 /** This class wrapps all available objects that can be created by a script.
 *	@ingroup scripting
@@ -293,11 +295,17 @@ namespace ScriptingObjects
 		/** Changes the execute-permissions of a file. */
 		bool setExecutePermission(bool shouldBeExecutable);
 
+		/** Returns a sibling file that doesn't exist. */
+		var getNonExistentSibling();
+
 		/** Launches the file as a process. */
 		bool startAsProcess(String parameters);
 		
 		/** Reads a file and generates the hash of its contents. */
 		String getHash();
+
+		/** true if it's possible to create and write to this file. If the file doesn't already exist, this will check its parent directory to see if writing is allowed. */
+		bool hasWriteAccess();
 
 		/** Returns a String representation of that file. */
 		String toString(int formatType) const;
@@ -317,8 +325,20 @@ namespace ScriptingObjects
 		/** Replaces the file content with the JSON data. */
 		bool writeObject(var jsonData);
 
+		/** Replaces the XML file with the JSON content (needs to be convertible). */
+		bool writeAsXmlFile(var jsonDataToBeXmled, String tagName);
+
+		/** Loads the XML file and tries to parse it as JSON object. */
+		var loadFromXmlFile();
+
 		/** Writes the given data (either a Buffer or Array of Buffers) to a audio file. */
 		bool writeAudioFile(var audioData, double sampleRate, int bitDepth);
+
+		/** Writes the array of MessageHolders as MIDI file using the metadataObject to determine time signature, tempo, etc. */
+		bool writeMidiFile(var eventList, var metadataObject);
+
+		/** Loads the track (zero-based) of the MIDI file. If successful, it returns an object containing the time signature and a list of all events. */
+		var loadAsMidiFile(int trackIndex);
 
 		/** Replaces the file content with the given text. */
 		bool writeString(String text);
@@ -350,6 +370,9 @@ namespace ScriptingObjects
 		/** Extracts the ZIP archive if this file is a .zip file. */
 		void extractZipFile(var targetDirectory, bool overwriteFiles, var callback);
 
+		/** Returns the number of items in the zip file. */
+		int getNumZippedItems();
+
 		/** Changes the read/write permission for the given file. */
 		void setReadOnly(bool shouldBeReadOnly, bool applyRecursively);
 
@@ -363,6 +386,66 @@ namespace ScriptingObjects
 
 		JUCE_DECLARE_WEAK_REFERENCEABLE(ScriptFile);
 	};
+
+	struct ScriptErrorHandler : public ConstScriptingObject,
+								public OverlayMessageBroadcaster::Listener
+	{
+		ScriptErrorHandler(ProcessorWithScriptingContent* p);
+
+		~ScriptErrorHandler();
+
+		Identifier getObjectName() const override { RETURN_STATIC_IDENTIFIER("ErrorHandler"); }
+
+		void overlayMessageSent(int state, const String& message) override;
+
+		// =============================================================== API Methods
+
+		/** Sets a function with two arguments (int state, String message) that will be
+            notified at error events. 
+		*/
+		void setErrorCallback(var errorCallback);
+
+		/** Overrides the default HISE error messages with custom text. */
+		void setCustomMessageToShow(int state, String messageToShow);
+
+		/** Clears a state. If there is another error, it will send it again. */
+		void clearErrorLevel(int stateToClear);
+
+		/** Clear all states. */
+		void clearAllErrors();
+
+		/** Returns the current error message. */
+		String getErrorMessage() const;
+
+		/** Returns the number of currently active errors. */
+		int getNumActiveErrors() const;
+
+		/** Returns the current error level (and -1 if there is no error). */
+		int getCurrentErrorLevel() const;
+
+		/** Causes an error event to be sent through the system (for development purposes only). */
+		void simulateErrorEvent(int state);
+
+		// =============================================================== API Methods
+
+	private:
+
+		StringArray customErrorMessages;
+
+		void sendErrorForHighestState();
+
+		BigInteger errorStates;
+
+		
+
+		struct Wrapper;
+
+		WeakCallbackHolder callback;
+
+		var args[2];
+	};
+
+	
 
 	struct ScriptBackgroundTask : public ConstScriptingObject,
 								  public Thread
@@ -395,16 +478,16 @@ namespace ScriptingObjects
 				cancelButton.setBounds(b.removeFromBottom(24));
 			}
 
-			
 			BlackTextButtonLookAndFeel laf;
 			TextButton cancelButton;
-			
 		};
 
 		Component* createPopupComponent(const MouseEvent& e, Component *c) override
 		{
 			return new TaskViewer(this);
 		}
+
+		static void recompiled(ScriptBackgroundTask& task, bool unused);
 
 		// ==================================================================================== Start of API Methods
 
@@ -425,6 +508,9 @@ namespace ScriptingObjects
 
 		/** Call a function on the background thread. */
 		void callOnBackgroundThread(var backgroundTaskFunction);
+
+		/** Kills all voices and calls the given function on the sample loading thread. */
+		bool killVoicesAndCall(var loadingFunction);
 
 		/** Set a progress for this task. */
 		void setProgress(double p);
@@ -464,8 +550,6 @@ namespace ScriptingObjects
 
 		void callFinishCallback(bool isFinished, bool wasCancelled)
 		{
-			
-
 			if (finishCallback)
 			{
 				var args[2] = { var(isFinished), var(wasCancelled) };
@@ -480,6 +564,10 @@ namespace ScriptingObjects
 		NamedValueSet synchronisedData;
 		WeakCallbackHolder currentTask;
 		WeakCallbackHolder finishCallback;
+
+        bool realtimeSafe = true;
+        
+		JUCE_DECLARE_WEAK_REFERENCEABLE(ScriptBackgroundTask);
 	};
 
 	class ScriptFFT : public ConstScriptingObject,
@@ -604,12 +692,56 @@ namespace ScriptingObjects
 		int maxNumSamples = 0;
 	};
 
+	struct ScriptBuilder : public ConstScriptingObject
+	{
+		ScriptBuilder(ProcessorWithScriptingContent* p);
+
+		~ScriptBuilder();
+
+		// ============================================================================================= API
+
+		/** Creates a module and returns the build index (0=master container). */
+		int create(var type, var id, int rootBuildIndex, int chainIndex);
+
+		/** Connects the script processor to an external script. */
+		bool connectToScript(int buildIndex, String relativePath);
+
+		/** Returns a typed reference for the module with the given build index. */
+		var get(int buildIndex, String interfaceType);
+
+		/** Adds the existing module to the internal list and returns the index for refering to it. */
+		int getExisting(String processorId);
+
+		/** Set multiple attributes for the given module at once using a JSON object. */
+		void setAttributes(int buildIndex, var attributeValues);
+
+		/** WARNING: Clears all child sound generators, effects and MIDI processor (except for this one obviously). */
+		void clear();
+
+		/** Sends a rebuild message. Call this after you've created all the processors to make sure that the patch browser is updated accordingly. */
+		void flush();
+
+		// ============================================================================================= API
+
+		Identifier getObjectName() const override { return "Builder"; }
+
+	private:
+
+		bool flushed = true;
+
+		struct Wrapper;
+
+		Array<WeakReference<Processor>> createdModules;
+
+		void createJSONConstants();
+	};
+
 	struct ScriptDownloadObject : public ConstScriptingObject,
 		public URL::DownloadTask::Listener
 	{
 		using Ptr = ReferenceCountedObjectPtr<ScriptDownloadObject>;
 
-		ScriptDownloadObject(ProcessorWithScriptingContent* pwsc, const URL& url, const File& targetFile, var callback);;
+		ScriptDownloadObject(ProcessorWithScriptingContent* pwsc, const URL& url, const String& extraHeader, const File& targetFile, var callback);;
 
 		~ScriptDownloadObject();
 
@@ -711,6 +843,8 @@ namespace ScriptingObjects
 
 		WeakCallbackHolder callback;
 
+		String extraHeaders;
+
 		ScopedPointer<URL::DownloadTask> download;
 
 		JavascriptProcessor* jp = nullptr;
@@ -755,8 +889,6 @@ namespace ScriptingObjects
 				contentCallback.call1(data);
 			}
 		}
-
-		
 
 	protected:
 
@@ -884,6 +1016,12 @@ namespace ScriptingObjects
 		/** Creates a path objects scaled to the given bounds and sourceRange */
 		var createPath(var dstArea, var sourceRange, var normalisedStartValue);
 
+		/** Sets the ring buffer properties from an object (Use the JSON from the Edit Properties popup). */
+		void setRingBufferProperties(var propertyData);
+
+        /** Enables or disables the ring buffer. */
+        void setActive(bool shouldBeActive);
+        
 		// ============================================================================================================
 
 	private:
@@ -1348,7 +1486,9 @@ namespace ScriptingObjects
 
 		// ============================================================================================================
 
-		Identifier getObjectName() const override { RETURN_STATIC_IDENTIFIER("Modulator"); }
+		static Identifier getClassName() { RETURN_STATIC_IDENTIFIER("Modulator"); }
+
+		Identifier getObjectName() const override { return getClassName(); }
 		bool objectDeleted() const override { return mod.get() == nullptr; }
 		bool objectExists() const override { return mod != nullptr;	}
 
@@ -1375,6 +1515,12 @@ namespace ScriptingObjects
 
 		/** Returns the Type of the modulator. */
 		String getType() const;
+		
+		/** Connects a receive modulator to a global modulator. */
+		bool connectToGlobalModulator(String globalModulationContainerId, String modulatorId);
+		
+		/** Returns the id of the global modulation container and global modulator this modulator is connected to */
+		String getGlobalModulatorId();
 		
 		/** Sets the attribute of the Modulator. You can look up the specific parameter indexes in the manual. */
 		void setAttribute(int index, float value);
@@ -1477,7 +1623,9 @@ namespace ScriptingObjects
 		ScriptingEffect(ProcessorWithScriptingContent *p, EffectProcessor *fx);
 		~ScriptingEffect() {};
 
-		Identifier getObjectName() const override { RETURN_STATIC_IDENTIFIER("Effect"); }
+		static Identifier getClassName() { RETURN_STATIC_IDENTIFIER("Effect"); }
+
+		Identifier getObjectName() const override { return getClassName(); }
 		bool objectDeleted() const override { return effect.get() == nullptr; }
 		bool objectExists() const override { return effect != nullptr; }
 
@@ -1573,7 +1721,9 @@ namespace ScriptingObjects
 		ScriptingSlotFX(ProcessorWithScriptingContent *p, EffectProcessor *fx);
 		~ScriptingSlotFX() {};
 
-		Identifier getObjectName() const override { RETURN_STATIC_IDENTIFIER("SlotFX"); }
+		static Identifier getClassName() { RETURN_STATIC_IDENTIFIER("SlotFX"); }
+
+		Identifier getObjectName() const override { return getClassName(); }
 		bool objectDeleted() const override { return slotFX.get() == nullptr; }
 		bool objectExists() const override { return slotFX != nullptr; }
 
@@ -1603,13 +1753,22 @@ namespace ScriptingObjects
 		ScriptingEffect* getCurrentEffect();
 
 		/** Swaps the effect with the other slot. */
-		void swap(var otherSlot);
+		bool swap(var otherSlot);
 
+		/** Returns the list of all available modules that you can load into the slot (might be empty if there is no compiled dll present). */
+		var getModuleList();
+
+        /** Returns a JSON object containing all parameters with their range properties. */
+        var getParameterProperties();
+        
+        /** Returns the ID of the effect that is currently loaded. */
+        String getCurrentEffectId();
+        
 		// ============================================================================================================
 
 		struct Wrapper;
 
-		SlotFX* getSlotFX();
+		HotswappableProcessor* getSlotFX();
 
 	private:
 
@@ -1628,7 +1787,9 @@ namespace ScriptingObjects
 		ScriptRoutingMatrix(ProcessorWithScriptingContent *p, Processor *processor);
 		~ScriptRoutingMatrix() {};
 
-		Identifier getObjectName() const override { RETURN_STATIC_IDENTIFIER("RoutingMatrix"); }
+		static Identifier getClassName() { RETURN_STATIC_IDENTIFIER("RoutingMatrix"); }
+
+		Identifier getObjectName() const override { return getClassName(); }
 		bool objectDeleted() const override { return rp.get() == nullptr; }
 		bool objectExists() const override { return rp != nullptr; }
 
@@ -1640,6 +1801,9 @@ namespace ScriptingObjects
 		void doubleClickCallback(const MouseEvent &, Component*) override {};
 
 		// ============================================================================================================ 
+
+		/** Sets the amount of channels (if the matrix is resizeable). */
+		void setNumChannels(int numSourceChannels);
 
 		/** adds a connection to the given channels. */
 		bool addConnection(int sourceIndex, int destinationIndex);
@@ -1681,7 +1845,9 @@ namespace ScriptingObjects
 		ScriptingSynth(ProcessorWithScriptingContent *p, ModulatorSynth *synth_);
 		~ScriptingSynth() {};
 
-		Identifier getObjectName() const override { RETURN_STATIC_IDENTIFIER("ChildSynth"); };
+		static Identifier getClassName() { RETURN_STATIC_IDENTIFIER("ChildSynth"); }
+
+		Identifier getObjectName() const override { return getClassName(); };
 		bool objectDeleted() const override { return synth.get() == nullptr; };
 		bool objectExists() const override { return synth != nullptr; };
 
@@ -1779,7 +1945,9 @@ namespace ScriptingObjects
 		ScriptingMidiProcessor(ProcessorWithScriptingContent *p, MidiProcessor *mp_);;
 		~ScriptingMidiProcessor() {};
 
-		Identifier getObjectName() const override { RETURN_STATIC_IDENTIFIER("MidiProcessor"); }
+		static Identifier getClassName() { RETURN_STATIC_IDENTIFIER("MidiProcessor"); }
+
+		Identifier getObjectName() const override { return getClassName(); }
 		bool objectDeleted() const override { return mp.get() == nullptr; }
 		bool objectExists() const override { return mp != nullptr; }
 
@@ -1856,10 +2024,12 @@ namespace ScriptingObjects
 
 		// ============================================================================================================
 
-		ScriptingAudioSampleProcessor(ProcessorWithScriptingContent *p, AudioSampleProcessor *sampleProcessor);
+		ScriptingAudioSampleProcessor(ProcessorWithScriptingContent *p, Processor *sampleProcessor);
 		~ScriptingAudioSampleProcessor() {};
 
-		Identifier getObjectName() const override { RETURN_STATIC_IDENTIFIER("AudioSampleProcessor"); };
+		static Identifier getClassName() { RETURN_STATIC_IDENTIFIER("AudioSampleProcessor"); }
+
+		Identifier getObjectName() const override { return getClassName(); };
 		bool objectDeleted() const override { return audioSampleProcessor.get() == nullptr; }
 		bool objectExists() const override { return audioSampleProcessor != nullptr; }
 
@@ -1926,7 +2096,9 @@ namespace ScriptingObjects
 
 		ScriptSliderPackProcessor(ProcessorWithScriptingContent* p, ExternalDataHolder* h);
 
-		Identifier getObjectName() const override { RETURN_STATIC_IDENTIFIER("SliderPackProcessor"); };
+		static Identifier getClassName() { RETURN_STATIC_IDENTIFIER("SliderPackProcessor"); }
+
+		Identifier getObjectName() const override { return getClassName(); };
 		bool objectDeleted() const override { return sp.get() == nullptr; }
 		bool objectExists() const override { return sp.get() != nullptr; }
 
@@ -1979,7 +2151,9 @@ namespace ScriptingObjects
 		ScriptingTableProcessor(ProcessorWithScriptingContent *p, ExternalDataHolder *tableProcessor);
 		~ScriptingTableProcessor() {};
 
-		Identifier getObjectName() const override {	RETURN_STATIC_IDENTIFIER("TableProcessor"); };
+		static Identifier getClassName() { RETURN_STATIC_IDENTIFIER("TableProcessor"); }
+
+		Identifier getObjectName() const override { return getClassName(); };
 		bool objectDeleted() const override { return tableProcessor.get() == nullptr; }
 		bool objectExists() const override { return tableProcessor != nullptr; }
 
@@ -2021,22 +2195,91 @@ namespace ScriptingObjects
 
 
 	struct GlobalRoutingManagerReference : public ConstScriptingObject,
-										  public ControlledObject
+										   public ControlledObject,
+										   public WeakErrorHandler,
+										   public OSCReceiver::Listener<OSCReceiver::RealtimeCallback>
+										   
 	{
 		GlobalRoutingManagerReference(ProcessorWithScriptingContent* sp);;
+
+		~GlobalRoutingManagerReference();
 
 		Identifier getObjectName() const override { RETURN_STATIC_IDENTIFIER("GlobalRoutingManager"); }
 
 		Component* createPopupComponent(const MouseEvent& e, Component *c) override;
+
+		void handleErrorMessage(const String& error) override
+		{
+			if(errorCallback)
+				errorCallback.call1(error);
+		}
+
+		void oscBundleReceived(const OSCBundle& bundle) override;
+
+		void oscMessageReceived(const OSCMessage& message) override;
 
 		// =============================================================================================
 
 		/** Returns a scripted reference to the global cable (and creates a cable with this ID if it can't be found. */
 		var getCable(String cableId);
 
+		/** Allows the global routing manager to send and receive OSC messages through the cables. */
+		bool connectToOSC(var connectionData, var errorFunction);
+
+		/** Register a scripting callback to be executed when a OSC message that matches the subAddress is received. */
+		void addOSCCallback(String oscSubAddress, var callback);
+
+		/** Send an OSC message to the output port. */
+		bool sendOSCMessage(String oscSubAddress, var data);
+
 		// =============================================================================================
 
 	private:
+
+		WeakCallbackHolder errorCallback;
+
+		struct OSCCallback: public ReferenceCountedObject
+		{
+			using List = ReferenceCountedArray<OSCCallback>;
+
+			OSCCallback(GlobalRoutingManagerReference* parent, String& sd, const var& cb) :
+				callback(parent->getScriptProcessor(), parent, cb, 2),
+				subDomain(sd),
+				fullAddress("/*")
+			{
+				callback.incRefCount();
+				callback.setHighPriority();
+			};
+
+			WeakCallbackHolder callback;
+			const String subDomain;
+			OSCAddressPattern fullAddress;
+
+			void rebuildFullAddress(const String& newRoot)
+			{
+				try
+				{
+					fullAddress = OSCAddressPattern(newRoot + subDomain);
+				}
+				catch (OSCFormatError& e)
+				{
+					throw e.description;
+				}
+			}
+
+			void callForMessage(const OSCMessage& c);
+
+			var args[2];
+
+			bool shouldFire(const OSCAddress& oscAddress)
+			{
+				return callback && fullAddress.matches(oscAddress);
+			}
+
+			JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(OSCCallback);
+		};
+
+		OSCCallback::List callbacks;
 
 		struct Wrapper;
 
@@ -2077,6 +2320,9 @@ namespace ScriptingObjects
 
 		/** Registers a function that will be executed whenever a value is sent through the cable. */
 		void registerCallback(var callbackFunction, bool synchronous);
+
+		/** Connects the cable to a macro control. */
+		void connectToMacroControl(int macroIndex, bool macroIsTarget, bool filterRepetitions);
 
 		// =============================================================================================
 
@@ -2173,6 +2419,53 @@ namespace ScriptingObjects
         JUCE_DECLARE_WEAK_REFERENCEABLE(TimerObject);
 	};
 
+	class ScriptedMidiAutomationHandler : public ConstScriptingObject,
+									      public SafeChangeListener
+	{
+	public:
+
+		struct Wrapper;
+
+		ScriptedMidiAutomationHandler(ProcessorWithScriptingContent* sp);
+
+		~ScriptedMidiAutomationHandler();
+
+		void changeListenerCallback(SafeChangeBroadcaster *b) override;
+
+		static Identifier getClassName() { RETURN_STATIC_IDENTIFIER("MidiAutomationHandler"); };
+
+		Identifier getObjectName() const override { RETURN_STATIC_IDENTIFIER("MidiAutomationHandler"); }
+
+		// ============================================================================================================ API Methods
+
+		/** Returns an object that contains the MIDI automation data. */
+		var getAutomationDataObject();
+
+		/** Sets the MIDI automation from the automation data object. */
+		void setAutomationDataFromObject(var automationData);
+
+		/** Sets the numbers that are displayed in the MIDI automation popup. */
+		void setControllerNumbersInPopup(var numberArray);
+
+		/** Replaces the names in the popup. */
+		void setControllerNumberNames(var ccName, var nameArray);
+
+		/** Enables the "exclusive" mode for MIDI automation (only one active parameter for each controller). */
+		void setExclusiveMode(bool shouldBeExclusive);
+
+		/** Set a function (with one parameter containing the automation data as JSON) that will be executed whenever the MIDI automation changes. */
+		void setUpdateCallback(var callback);
+
+		/** Sets whether a automated MIDI CC message should be consumed by the automation handler (default is enabled). */
+		void setConsumeAutomatedControllers(bool shouldBeConsumed);
+
+		// ============================================================================================================ End of API Methods
+
+	private:
+
+		MidiControllerAutomationHandler* handler;
+		WeakCallbackHolder updateCallback;
+	};
 
 	class ScriptedMidiPlayer : public MidiPlayerBaseType,
 								public ConstScriptingObject,
@@ -2183,15 +2476,13 @@ namespace ScriptingObjects
 		ScriptedMidiPlayer(ProcessorWithScriptingContent* p, MidiPlayer* player_);
 		~ScriptedMidiPlayer();
 
-		Identifier getObjectName() const override { RETURN_STATIC_IDENTIFIER("MidiPlayer"); }
+		static Identifier getClassName() { RETURN_STATIC_IDENTIFIER("MidiPlayer"); };
+		Identifier getObjectName() const override { return getClassName(); }
 
 		String getDebugValue() const override;
 
-		String getDebugName() const override;
-
 		void sequenceLoaded(HiseMidiSequence::Ptr newSequence) override;
-		void trackIndexChanged() override;
-		void sequenceIndexChanged() override;
+		
 		void sequencesCleared() override;
 
 		void timerCallback() override;
@@ -2207,10 +2498,19 @@ namespace ScriptingObjects
 		/** Returns the playback position in the current loop between 0.0 and 1.0. */
 		var getPlaybackPosition();
 
+		/** Returns the position of the last played note. */
+		var getLastPlayedNotePosition() const;
+
+		/** Syncs the playback of this MIDI player to the master clock (external or internal). */
+		void setSyncToMasterClock(bool shouldSyncToMasterClock);
+
 		/** If true, the panel will get a repaint() call whenever the playback position changes. 
 		
 			Otherwise it will only be updated when the sequence changes. */
 		void setRepaintOnPositionChange(var shouldRepaintPanel);
+
+		/** If enabled, it uses the global undo manager for all edits (So you can use Engine.undo()). */
+		void setUseGlobalUndoManager(bool shouldUseGlobalUndoManager);
 
 		/** Connect this to the panel and it will be automatically updated when something changes. */
 		void connectToPanel(var panel);
@@ -2220,6 +2520,12 @@ namespace ScriptingObjects
 
 		/** Writes the given array of MessageHolder objects into the current sequence. This is undoable. */
 		void flushMessageList(var messageList);
+
+		/** Uses Ticks instead of samples when editing the MIDI data. */
+		void setUseTimestampInTicks(bool shouldUseTicksAsTimestamps);
+
+		/** Returns the tick resolution for a quarter note. */
+		int getTicksPerQuarter() const;
 
 		/** Creates an empty sequence with the given length. */
 		void create(int nominator, int denominator, int barLength);
@@ -2272,11 +2578,57 @@ namespace ScriptingObjects
 		/** Sets the timing information of the current sequence using the given object. */
 		bool setTimeSignature(var timeSignatureObject);
 
+		/** This will send any CC messages from the MIDI file to the global MIDI handler. */
+		void setAutomationHandlerConsumesControllerEvents(bool shouldBeEnabled);
+
+		/** Attaches a callback that gets executed whenever the sequence was changed. */
+		void setSequenceCallback(var updateFunction);
+
+		/** Attaches a callback with two arguments (timestamp, playState) that gets executed when the play state changes. */
+		void setPlaybackCallback(var playbackCallback, bool synchronous);
+
+		/** Returns a typed MIDI processor reference (for setting attributes etc). */
+		var asMidiProcessor();
+
+		/** Sets a global playback ratio (for all MIDI players). */
+		void setGlobalPlaybackRatio(double globalRatio);
+
 		// ============================================================================================================
 
 		struct Wrapper;
 
+		
+
 	private:
+
+		void callUpdateCallback();
+
+		
+
+		struct PlaybackUpdater : public PooledUIUpdater::SimpleTimer,
+								 public MidiPlayer::PlaybackListener
+		{
+			PlaybackUpdater(ScriptedMidiPlayer& parent_, var f, bool sync_);
+
+			~PlaybackUpdater();
+
+			void timerCallback() override;
+
+			void playbackChanged(int timestamp, MidiPlayer::PlayState newState) override;
+
+			bool dirty = false;
+			const bool sync;
+			ScriptedMidiPlayer& parent;
+			WeakCallbackHolder playbackCallback;
+
+			var args[2];
+		};
+
+		ScopedPointer<PlaybackUpdater> playbackUpdater;
+
+		WeakCallbackHolder updateCallback;
+
+		bool useTicks = false;
 
 		bool repaintOnPlaybackChange = false;
 

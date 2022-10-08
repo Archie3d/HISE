@@ -179,8 +179,13 @@ class extra_mod : public hise_mod_base
 {
 public:
 
-	SET_HISE_NODE_ID("extra_mod");
+	SN_NODE_ID("extra_mod");
 	SN_GET_SELF_AS_OBJECT(extra_mod);
+
+	extra_mod()
+	{
+		cppgen::CustomNodeProperties::setPropertyForObject(*this, PropertyIds::UncompileableNode);
+	}
 
 	enum Index
 	{
@@ -255,8 +260,13 @@ class pitch_mod : public hise_mod_base
 {
 public:
 
-	SET_HISE_NODE_ID("pitch_mod");
+	SN_NODE_ID("pitch_mod");
 	SN_GET_SELF_AS_OBJECT(pitch_mod);
+
+	pitch_mod()
+	{
+		cppgen::CustomNodeProperties::setPropertyForObject(*this, PropertyIds::UncompileableNode);
+	}
 
 	static constexpr bool isNormalisedModulation() { return false; }
 
@@ -345,8 +355,13 @@ class global_mod : public hise_mod_base
 {
 public:
 
-	SET_HISE_NODE_ID("global_mod");
+	SN_NODE_ID("global_mod");
 	SN_GET_SELF_AS_OBJECT(global_mod);
+
+	global_mod()
+	{
+		cppgen::CustomNodeProperties::setPropertyForObject(*this, PropertyIds::UncompileableNode);
+	}
 
 	static constexpr bool isNormalisedModulation() { return true; }
 

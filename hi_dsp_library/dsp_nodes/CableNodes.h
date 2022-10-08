@@ -46,9 +46,9 @@ namespace control
 														   public pimpl::parameter_node_base<ParameterClass>,
 														   public pimpl::no_processing
 	{
-		SET_HISE_NODE_ID("cable_pack");
+		SN_NODE_ID("cable_pack");
 		SN_GET_SELF_AS_OBJECT(cable_pack);
-		HISE_ADD_SET_VALUE(cable_pack);
+		SN_ADD_SET_VALUE(cable_pack);
 		SN_PARAMETER_NODE_CONSTRUCTOR(cable_pack, ParameterClass);
 		SN_DESCRIPTION("Uses a slider pack to modify a modulation signal");
 
@@ -95,9 +95,9 @@ namespace control
 														   public pimpl::no_processing,
 														   public hise::ComplexDataUIUpdaterBase::EventListener
 	{
-		SET_HISE_NODE_ID("sliderbank");
+		SN_NODE_ID("sliderbank");
 		SN_GET_SELF_AS_OBJECT(sliderbank);
-		HISE_ADD_SET_VALUE(sliderbank);
+		SN_ADD_SET_VALUE(sliderbank);
 		SN_PARAMETER_NODE_CONSTRUCTOR(sliderbank, ParameterClass);
 		SN_DESCRIPTION("Scale a value with a slider pack and send it to multiple targets");
 
@@ -201,16 +201,21 @@ namespace control
 	struct file_analyser: public scriptnode::data::base,
 						  public pimpl::no_processing,
 						  public pimpl::templated_mode,
+						  public pimpl::no_mod_normalisation,
 						  public pimpl::parameter_node_base<ParameterClass>
 	{
-		SET_HISE_NODE_ID("file_analyser");
+		SN_NODE_ID("file_analyser");
 		SN_GET_SELF_AS_OBJECT(file_analyser);
-		SN_TEMPLATED_MODE_PARAMETER_NODE_CONSTRUCTOR(file_analyser, ParameterClass, "file_analysers");
+
+		file_analyser() :
+			templated_mode(getStaticId(), "file_analysers"),
+			pimpl::parameter_node_base<ParameterClass>(getStaticId()),
+			no_mod_normalisation(getStaticId(), {})
+		{};
+
 		SN_DESCRIPTION("Extracts file information (pitch, length, etc) and sends it as modulation signal on file load");
 
-		HISE_EMPTY_CREATE_PARAM;
-
-		static constexpr bool isNormalisedModulation() { return false; }
+		SN_EMPTY_CREATE_PARAM;
 
 		void initialise(NodeBase* n)
 		{
@@ -236,11 +241,17 @@ namespace control
 	};
 
 	template <typename ParameterClass> struct input_toggle : public pimpl::parameter_node_base<ParameterClass>,
+														     public pimpl::no_mod_normalisation,
 															 public pimpl::no_processing
 	{
-		SET_HISE_NODE_ID("input_toggle");
+		SN_NODE_ID("input_toggle");
 		SN_GET_SELF_AS_OBJECT(input_toggle);
-		SN_PARAMETER_NODE_CONSTRUCTOR(input_toggle, ParameterClass);
+
+		input_toggle() :
+			pimpl::parameter_node_base<ParameterClass>(getStaticId()),
+			pimpl::no_mod_normalisation(getStaticId(), {"Value1", "Value2" })
+		{};
+
 		SN_DESCRIPTION("Switch between two input values as modulation signal");
 
 		enum class Parameters
@@ -256,9 +267,9 @@ namespace control
 			DEF_PARAMETER(Value1, input_toggle);
 			DEF_PARAMETER(Value2, input_toggle);
 		};
-		PARAMETER_MEMBER_FUNCTION;
+		SN_PARAMETER_MEMBER_FUNCTION;
 
-		static constexpr bool isNormalisedModulation() { return false; };
+		
 
 		void setInput(double input)
 		{
@@ -319,10 +330,90 @@ namespace control
 		JUCE_DECLARE_WEAK_REFERENCEABLE(input_toggle);
 	};
 
-	class tempo_sync : public mothernode,
+	struct TempoData
+	{
+		TempoData() = default;
+
+		double currentTempoMilliseconds = 500.0;
+		double lastMs = 0.0;
+		bool enabled = false;
+		double unsyncedTime = false;
+		double multiplier = 1.0;
+		TempoSyncer::Tempo currentTempo = TempoSyncer::Tempo::Eighth;
+		double bpm = 120.0;
+
+		void refresh()
+		{
+			if (enabled)
+				currentTempoMilliseconds = TempoSyncer::getTempoInMilliSeconds(bpm, currentTempo) * multiplier;
+			else
+				currentTempoMilliseconds = unsyncedTime;
+		}
+
+		bool handleModulation(double& modValue)
+		{
+			if (lastMs != currentTempoMilliseconds)
+			{
+				lastMs = currentTempoMilliseconds;
+				modValue = currentTempoMilliseconds;
+				return true;
+			}
+
+			return false;
+		}
+	};
+
+	class clock_base : public mothernode,
 					   public hise::TempoListener
 	{
 	public:
+
+		virtual ~clock_base()
+		{
+			if (tempoSyncer != nullptr)
+				tempoSyncer->deregisterItem(this);
+		}
+
+		SN_EMPTY_INITIALISE;
+		SN_EMPTY_RESET;
+		SN_EMPTY_PROCESS;
+		SN_EMPTY_PROCESS_FRAME;
+		SN_EMPTY_HANDLE_EVENT
+
+		void prepare(PrepareSpecs ps)
+		{
+			jassert(ps.voiceIndex != nullptr);
+
+			tempoSyncer = ps.voiceIndex->getTempoSyncer();
+			tempoSyncer->registerItem(this);
+		}
+
+	protected:
+
+		DllBoundaryTempoSyncer* tempoSyncer = nullptr;
+	};
+
+	class tempo_sync_base: public clock_base
+	{
+	public:
+
+		virtual ~tempo_sync_base() {};
+
+		virtual TempoData getUIData() const = 0;
+
+
+	private:
+		JUCE_DECLARE_WEAK_REFERENCEABLE(tempo_sync_base);
+	};
+
+
+	template <int NV> class tempo_sync : public tempo_sync_base,
+										 public polyphonic_base,
+										 public pimpl::no_mod_normalisation
+	{
+	public:
+
+		static constexpr int NumVoices = NV;
 
 		enum class Parameters
 		{
@@ -339,36 +430,114 @@ namespace control
 			DEF_PARAMETER(Enabled, tempo_sync);
 			DEF_PARAMETER(UnsyncedTime, tempo_sync);
 		}
-		PARAMETER_MEMBER_FUNCTION;
+		SN_PARAMETER_MEMBER_FUNCTION;
 
-		bool isPolyphonic() const { return false; }
+		tempo_sync() :
+			polyphonic_base(getStaticId()),
+			no_mod_normalisation(getStaticId(), {})
+		{};
 
-		SET_HISE_NODE_ID("tempo_sync");
+		SN_POLY_NODE_ID("tempo_sync");
+
 		SN_GET_SELF_AS_OBJECT(tempo_sync);
 		SN_DESCRIPTION("Sends the tempo duration as modulation signal");
 
-		void prepare(PrepareSpecs ps);
+		SN_EMPTY_INITIALISE;
+		SN_EMPTY_RESET;
+		SN_EMPTY_PROCESS;
+		SN_EMPTY_PROCESS_FRAME;
+		SN_EMPTY_HANDLE_EVENT
 
-		HISE_EMPTY_INITIALISE;
-		HISE_EMPTY_RESET;
-		HISE_EMPTY_PROCESS;
-		HISE_EMPTY_PROCESS_SINGLE;
-		HISE_EMPTY_HANDLE_EVENT;
+		void prepare(PrepareSpecs ps)
+		{
+			clock_base::prepare(ps);
+			data.prepare(ps);
+		}
 
-		tempo_sync();
-		~tempo_sync();
+		~tempo_sync()
+		{
+			
+		}
 
-		void createParameters(ParameterDataList& data);
-		void tempoChanged(double newTempo) override;
-		void setTempo(double newTempoIndex);
-		bool handleModulation(double& max);
+		void createParameters(ParameterDataList& data)
+		{
+			{
+				DEFINE_PARAMETERDATA(tempo_sync, Tempo);
+				p.setParameterValueNames(TempoSyncer::getTempoNames());
+				data.add(std::move(p));
+			}
+			{
+				DEFINE_PARAMETERDATA(tempo_sync, Multiplier);
+				p.setRange({ 1, 16, 1.0 });
+				p.setDefaultValue(1.0);
+				data.add(std::move(p));
+			}
+			{
+				DEFINE_PARAMETERDATA(tempo_sync, Enabled);
+				p.setRange({ 0.0, 1.0, 1.0 });
+				p.setDefaultValue(0.0);
+				data.add(std::move(p));
+			}
+			{
+				DEFINE_PARAMETERDATA(tempo_sync, UnsyncedTime);
+				p.setRange({ 0.0, 1000.0, 0.1 });
+				p.setDefaultValue(200.0);
+				data.add(std::move(p));
+			}
+		}
 
-		static constexpr bool isNormalisedModulation() { return false; }
+		void tempoChanged(double newTempo) override
+		{
+			for (auto& t : data)
+			{
+				t.bpm = newTempo;
+				t.refresh();
+			}
+		}
 
-		void setMultiplier(double newMultiplier);
+		void setTempo(double newTempoIndex)
+		{
+			for (auto& t : data)
+			{
+				t.currentTempo = (TempoSyncer::Tempo)jlimit<int>(0, TempoSyncer::numTempos - 1, (int)newTempoIndex);
+				t.refresh();
+			}
+		}
 
-		void setEnabled(double v);
-		void setUnsyncedTime(double unsyncedTime);
+		bool handleModulation(double& max)
+		{
+			if(data.isMonophonicOrInsideVoiceRendering())
+				return data.get().handleModulation(max);
+
+			return false;
+		}
+
+		void setMultiplier(double newMultiplier)
+		{
+			for (auto& t : data)
+			{
+				t.multiplier = jlimit(1.0, 32.0, newMultiplier);
+				t.refresh();
+			}
+		}
+
+		void setEnabled(double v)
+		{
+			for (auto& t : data)
+			{
+				t.enabled = v > 0.5;
+				t.refresh();
+			}
+		}
+
+		void setUnsyncedTime(double v)
+		{
+			for (auto& t : data)
+			{
+				t.unsyncedTime = v;
+				t.refresh();
+			}
+		}
 
 		static void tempoChangedStatic(void* obj, double newBpm)
 		{
@@ -376,29 +545,176 @@ namespace control
 			s->tempoChanged(newBpm);
 		}
 
-		void refresh();
+		TempoData getUIData() const override { return data.getFirst(); }
 
-		double currentTempoMilliseconds = 500.0;
-		double lastTempoMs = 0.0;
-		double bpm = 120.0;
-
-		bool enabled = false;
-		double unsyncedTime = false;
-
-		double multiplier = 1.0;
-		TempoSyncer::Tempo currentTempo = TempoSyncer::Tempo::Eighth;
-
-
-		DllBoundaryTempoSyncer* tempoSyncer = nullptr;
+		PolyData<TempoData, NV> data;
 
 		JUCE_DECLARE_WEAK_REFERENCEABLE(tempo_sync);
 	};
+
+	template <typename T, int NV> class transport_base : public clock_base
+	{
+	public:
+
+		SN_EMPTY_CREATE_PARAM;
+
+		static constexpr int NumVoices = NV;
+
+		void prepare(PrepareSpecs ps)
+		{
+			clock_base::prepare(ps);
+			polyValue.prepare(ps);
+		}
+
+		bool handleModulation(double& v)
+		{
+			if (polyValue.get() != value)
+			{
+				v = (double)value;
+				polyValue.get() = value;
+				return true;
+			}
+
+			return false;
+		}
+
+	protected:
+
+		PolyData<T, NumVoices> polyValue;
+
+		T value = false;
+	};
+
+	template <int NV> class transport : public transport_base<bool, NV>
+	{
+	public:
+
+        static constexpr int NumVoices = NV;
+        
+		SN_GET_SELF_AS_OBJECT(transport);
+		SN_DESCRIPTION("Sends a modulation signal when the transport state changes");
+		SN_POLY_NODE_ID("transport");
+		
+		void onTransportChange(bool isPlaying, double /*ppqPosition*/) override
+		{
+			this->value = isPlaying;
+		}
+	};
+
+	template <int NV> class ppq : public transport_base<double, NV>
+	{
+	public:
+
+        static constexpr int NumVoices = NV;
+        
+		ppq()
+		{
+			loopLengthQuarters = TempoSyncer::getTempoFactor(TempoSyncer::Tempo::Quarter);
+		}
+
+		SN_GET_SELF_AS_OBJECT(ppq);
+		SN_DESCRIPTION("Sends a modulation signal with the playback position in quarters when the clock starts.");
+		SN_POLY_NODE_ID("ppq");
+
+		void onTransportChange(bool isPlaying, double ppqPosition) override
+		{
+			if (isPlaying)
+			{
+				ppqPos = ppqPosition;
+				updateValue();
+			}
+		}
+
+		template <int P> void setParameter(double v)
+		{
+			if (P == 0)
+				t = (TempoSyncer::Tempo)(int)v;
+			else if (P == 1)
+				factor = jlimit(1.0, 64.0, v);
+			
+			loopLengthQuarters = TempoSyncer::getTempoFactor(t) * factor;
+
+			if (loopLengthQuarters == 0.0)
+				loopLengthQuarters = 1.0;
+
+			updateValue();
+		}
+
+		SN_FORWARD_PARAMETER_TO_MEMBER(ppq);
+		
+		void createParameters(ParameterDataList& data)
+		{
+			{
+				parameter::data p("Tempo", { 0.0, 1.0 });
+				p.setParameterValueNames(TempoSyncer::getTempoNames());
+				p.setParameterCallbackWithIndex<ppq, 0>(this);
+				p.setDefaultValue((double)TempoSyncer::getTempoIndex("1/4"));
+				data.add(std::move(p));
+			}
+			{
+				parameter::data p("Multiplier", { 1.0, 16.0, 1.0 });
+				p.setParameterCallbackWithIndex<ppq, 1>(this);
+				p.setDefaultValue(1.0);
+				data.add(std::move(p));
+			}
+		}
+
+		void updateValue()
+		{
+			this->value = hmath::fmod(ppqPos, loopLengthQuarters) / loopLengthQuarters;
+		}
+
+		double ppqPos = 0.0;
+		TempoSyncer::Tempo t;
+		double factor;
+
+		double loopLengthQuarters;
+		
+	};
+
+	
+
+    struct pack_resizer: public data::base,
+                         public pimpl::no_processing
+                         
+    {
+        SN_NODE_ID("pack_resizer");
+        SN_GET_SELF_AS_OBJECT(pack_resizer);
+        
+        SN_DESCRIPTION("Dynamically resizes a slider pack");
+        
+        template <int P> void setParameter(double v)
+        {
+            if(auto sp = dynamic_cast<SliderPackData*>(this->externalData.obj))
+            {
+                DataWriteLock sl(this);
+                
+                auto newNumSliders = jlimit<int>(1, 128, roundToInt(v));
+                
+                sp->setNumSliders(roundToInt(newNumSliders));
+            }
+        }
+        
+        void createParameters(ParameterDataList& data)
+        {
+            {
+                parameter::data p("NumSliders", { 0.0, 128.0, 1.0 });
+                p.callback = parameter::inner<pack_resizer, 0>(*this);
+                data.add(std::move(p));
+            }
+        }
+        
+        SN_FORWARD_PARAMETER_TO_MEMBER(pack_resizer);
+        
+        float something = 90.0f;
+    };
+
 
 	template <typename ParameterClass> struct resetter : public mothernode,
 														 public pimpl::no_processing,
 														 public pimpl::parameter_node_base<ParameterClass>
 	{
-		SET_HISE_NODE_ID("resetter");
+		SN_NODE_ID("resetter");
 		SN_GET_SELF_AS_OBJECT(resetter);
 		SN_PARAMETER_NODE_CONSTRUCTOR(resetter, ParameterClass);
 		SN_DESCRIPTION("Sends an inverted impulse (0,1) to reset gate-like parameters");
@@ -414,14 +730,14 @@ namespace control
 		{
 			{
 				parameter::data p("Value", { 0.0, 1.0 });
-				p.callback = parameter::inner<resetter, 0>(*this);
+				registerCallback<0>(p);
 				data.add(std::move(p));
 			}
 		}
 
 		int flashCounter = 0;
 
-		FORWARD_PARAMETER_TO_MEMBER(resetter);
+		SN_FORWARD_PARAMETER_TO_MEMBER(resetter);
 
 		JUCE_DECLARE_WEAK_REFERENCEABLE(resetter);
 	};
@@ -435,8 +751,8 @@ namespace control
 			Volume = 7,
 			Expression = 11,
 			Sustain = 64,
-			Aftertouch = 128,
-			Pitchbend = 129,
+			Aftertouch = HiseEvent::AfterTouchCCNumber,
+			Pitchbend = HiseEvent::PitchWheelCCNumber,
 			Stroke = 130,
 			Release = 131
 		};
@@ -505,9 +821,9 @@ namespace control
 			DEF_PARAMETER(EnableMPE, midi_cc);
 			DEF_PARAMETER(DefaultValue, midi_cc);
 		}
-		PARAMETER_MEMBER_FUNCTION;
+		SN_PARAMETER_MEMBER_FUNCTION;
 
-		SET_HISE_NODE_ID("midi_cc");
+		SN_NODE_ID("midi_cc");
 		SN_GET_SELF_AS_OBJECT(midi_cc);
 		SN_PARAMETER_NODE_CONSTRUCTOR(midi_cc, ParameterClass);
 		SN_DESCRIPTION("sends a MIDI cc value");
@@ -601,19 +917,25 @@ namespace control
 		JUCE_DECLARE_WEAK_REFERENCEABLE(midi_cc);
 	};
 
-	
 	template <typename ExpressionClass, typename ParameterClass> struct cable_expr : public mothernode,
 																					 public pimpl::parameter_node_base<ParameterClass>,
+																					 public pimpl::no_mod_normalisation,
 																					 public pimpl::no_processing
 	{
-		SET_HISE_NODE_ID("cable_expr");
+		
+
+		SN_NODE_ID("cable_expr");
 		SN_GET_SELF_AS_OBJECT(cable_expr);
 		SN_DESCRIPTION("evaluates an expression for the control value");
 
-		HISE_ADD_SET_VALUE(cable_expr);
-		SN_PARAMETER_NODE_CONSTRUCTOR(cable_expr, ParameterClass);
+		SN_ADD_SET_VALUE(cable_expr);
+		
+		cable_expr() : 
+			pimpl::parameter_node_base<ParameterClass>(getStaticId()),
+			no_mod_normalisation(getStaticId(), { "Value" })
+		{};
 
-		HISE_DEFAULT_INIT(ExpressionClass);
+		SN_DEFAULT_INIT(ExpressionClass);
 
 		void setValue(double input)
 		{
@@ -627,22 +949,83 @@ namespace control
 		double lastValue = 0.0;
 	};
 
-    template <typename ConverterClass, typename ParameterClass>
+	template <typename ParameterClass> struct voice_bang : public mothernode,
+														   public pimpl::parameter_node_base<ParameterClass>,
+														   public pimpl::no_processing
+	{
+		SN_NODE_ID("voice_bang");
+		SN_GET_SELF_AS_OBJECT(voice_bang);
+		SN_DESCRIPTION("sends out the current value when a voice is started (note-on is received)");
+
+		SN_ADD_SET_VALUE(voice_bang);
+
+		voice_bang() :
+			pimpl::parameter_node_base<ParameterClass>(getStaticId())
+		{};
+
+		void handleHiseEvent(HiseEvent& e)
+		{
+			if (e.isNoteOn())
+			{
+				if (this->getParameter().isConnected())
+					this->getParameter().call(value);
+			}
+		}
+
+		void setValue(double input)
+		{
+			value = input;
+		}
+
+		double value = 0.0;
+	};
+
+	
+
+	template <typename ParameterClass> struct normaliser : public mothernode,
+														   public pimpl::parameter_node_base<ParameterClass>,
+														   public pimpl::no_processing
+	{
+
+
+		SN_NODE_ID("normaliser");
+		SN_GET_SELF_AS_OBJECT(normaliser);
+		SN_DESCRIPTION("normalises the input value");
+
+		SN_ADD_SET_VALUE(normaliser);
+
+		normaliser() :
+			pimpl::parameter_node_base<ParameterClass>(getStaticId())
+		{};
+
+		void setValue(double input)
+		{
+			if (this->getParameter().isConnected())
+				this->getParameter().call(input);
+		}
+	};
+
+    template <typename ParameterClass, typename ConverterClass>
         struct converter : public mothernode,
+						   public pimpl::templated_mode,
+						   public pimpl::no_mod_normalisation,
                            public pimpl::parameter_node_base<ParameterClass>,
                            public pimpl::no_processing
     {
-        SET_HISE_NODE_ID("converter");
+        SN_NODE_ID("converter");
         SN_GET_SELF_AS_OBJECT(converter);
         SN_DESCRIPTION("converts a control value");
 
-        HISE_DEFAULT_INIT(ConverterClass);
-        HISE_DEFAULT_PREPARE(ConverterClass);
-        HISE_ADD_SET_VALUE(converter);
-        SN_PARAMETER_NODE_CONSTRUCTOR(converter, ParameterClass);
+        SN_DEFAULT_INIT(ConverterClass);
+        SN_DEFAULT_PREPARE(ConverterClass);
+        SN_ADD_SET_VALUE(converter);
 
-        static constexpr bool isNormalisedModulation() { return false; }
-        
+		converter() :
+			pimpl::templated_mode(getStaticId(), "conversion_logic"),
+			pimpl::no_mod_normalisation(getStaticId(), { "Value" }),
+			pimpl::parameter_node_base<ParameterClass>(getStaticId())
+		{};
+
         void setValue(double input)
         {
             auto v = obj.getValue(input);
@@ -658,11 +1041,11 @@ namespace control
 															public pimpl::parameter_node_base<ParameterClass>,
 															public pimpl::no_processing
 	{
-		SET_HISE_NODE_ID("cable_table");
+		SN_NODE_ID("cable_table");
 		SN_GET_SELF_AS_OBJECT(cable_table);
 		SN_DESCRIPTION("Modify a modulation signal using a lookup table");
 
-		HISE_ADD_SET_VALUE(cable_table);
+		SN_ADD_SET_VALUE(cable_table);
 		SN_PARAMETER_NODE_CONSTRUCTOR(cable_table, ParameterClass);
 
 		void setExternalData(const ExternalData& d, int index) override
@@ -702,7 +1085,7 @@ namespace control
 														 public hise::ComplexDataUIUpdaterBase::EventListener
 	{
 		SN_GET_SELF_AS_OBJECT(clone_pack);
-		SET_HISE_NODE_ID("clone_pack");
+		SN_NODE_ID("clone_pack");
 		
 		enum class Parameters
 		{
@@ -715,7 +1098,7 @@ namespace control
 			DEF_PARAMETER(NumClones, clone_pack);
 			DEF_PARAMETER(Value, clone_pack);
 		};
-		PARAMETER_MEMBER_FUNCTION;
+		SN_PARAMETER_MEMBER_FUNCTION;
 
 		SN_DESCRIPTION("control cloned parameters with a slider pack");
 		
@@ -822,7 +1205,7 @@ namespace control
 							 public control::pimpl::templated_mode								
 	{
 		SN_GET_SELF_AS_OBJECT(clone_cable);
-		SET_HISE_NODE_ID("clone_cable");
+		SN_NODE_ID("clone_cable");
 		SN_DESCRIPTION("Send different values to cloned nodes");
 
 		clone_cable():
@@ -848,7 +1231,7 @@ namespace control
 			DEF_PARAMETER(Value, clone_cable);
 			DEF_PARAMETER(Gamma, clone_cable);
 		};
-		PARAMETER_MEMBER_FUNCTION;
+		SN_PARAMETER_MEMBER_FUNCTION;
 
 		void initialise(NodeBase* n)
 		{
@@ -942,12 +1325,12 @@ namespace control
 																		   public control::pimpl::templated_mode,
 																		   public pimpl::no_processing
 	{
-		SET_HISE_NODE_ID("xfader");
+		SN_NODE_ID("xfader");
 		SN_GET_SELF_AS_OBJECT(xfader);
 		SN_TEMPLATED_MODE_PARAMETER_NODE_CONSTRUCTOR(xfader, ParameterClass, "faders");
 		SN_DESCRIPTION("Apply a crossfade to multiple outputs");
 
-		HISE_ADD_SET_VALUE(xfader);
+		SN_ADD_SET_VALUE(xfader);
 
 		void initialise(NodeBase* n) override
 		{
@@ -995,9 +1378,113 @@ namespace control
 
 	namespace multilogic
 	{
+		struct intensity
+		{
+			SN_NODE_ID("intensity");
+			SN_DESCRIPTION("applies the HISE modulation intensity to the value");
+
+			static constexpr bool isNormalisedModulation() { return true; }
+
+			double intensityValue = 1.0;
+			double value = 1.0;
+			mutable bool dirty = false;
+
+			bool operator==(const intensity& other) const
+			{
+				return value == other.value && intensityValue == other.intensityValue;
+			}
+
+			double getValue() const
+			{
+				dirty = false;
+
+				return 1.0 * (1.0 - intensityValue) + intensityValue * value;
+			}
+
+			template <int P> void setParameter(double v)
+			{
+				if constexpr (P == 0)
+					value = v;
+				if constexpr (P == 1)
+					intensityValue = jlimit(0.0, 1.0, v);
+				
+				dirty = true;
+			}
+
+			template <typename NodeType> static void createParameters(ParameterDataList& data, NodeType& n)
+			{
+				{
+					parameter::data p("Value");
+					p.template setParameterCallbackWithIndex<NodeType, 0>(&n);
+					p.setRange({ 0.0, 1.0 });
+					p.setDefaultValue(0.0);
+					data.add(std::move(p));
+				}
+				{
+					parameter::data p("Intensity");
+					p.template setParameterCallbackWithIndex<NodeType, 1>(&n);
+					p.setRange({ 0.0, 1.0 });
+					p.setDefaultValue(1.0);
+					data.add(std::move(p));
+				}
+			}
+		};
+
+		struct bang: public pimpl::no_mod_normalisation
+		{
+			SN_NODE_ID("bang");
+			SN_DESCRIPTION("send the value when the bang input changes");
+
+			bang() :
+				no_mod_normalisation(getStaticId(), { "Value" })
+			{};
+
+			static constexpr bool isNormalisedModulation() { return false; }
+
+			bool operator==(const bang& other) const
+			{
+				return value == other.value;
+			}
+
+			double getValue() const
+			{
+				dirty = false;
+				return value;
+			}
+
+			template <typename NodeType> static void createParameters(ParameterDataList& data, NodeType& n)
+			{
+				{
+					parameter::data p("Value");
+					p.template setParameterCallbackWithIndex<NodeType, 0>(&n);
+					p.setRange({ 0.0, 1.0 });
+					p.setDefaultValue(0.0);
+					data.add(std::move(p));
+				}
+				{
+					parameter::data p("Bang");
+					p.template setParameterCallbackWithIndex<NodeType, 1>(&n);
+					p.setRange({ 0.0, 1.0, 1.0 });
+					p.setDefaultValue(0.0);
+					data.add(std::move(p));
+				}
+			}
+
+			template <int P> void setParameter(double v)
+			{
+				if constexpr (P == 0)
+					value = v;
+				if constexpr (P == 1)
+					dirty = v > 0.5;
+			}
+
+			double value;
+			mutable bool dirty = false;
+		};
+
 		struct bipolar
 		{
-			SET_HISE_NODE_ID("bipolar");
+			SN_NODE_ID("bipolar");
 			SN_DESCRIPTION("Creates a bipolar mod signal from a 0...1 range");
 
 			static constexpr bool isNormalisedModulation() { return true; }
@@ -1036,21 +1523,21 @@ namespace control
 			{
 				{
 					parameter::data p("Value");
-					p.callback = parameter::inner<NodeType, 0>(n);
+					p.template setParameterCallbackWithIndex<NodeType, 0>(&n);
 					p.setRange({ 0.0, 1.0 });
 					p.setDefaultValue(0.0);
 					data.add(std::move(p));
 				}
 				{
 					parameter::data p("Scale");
-					p.callback = parameter::inner<NodeType, 1>(n);
+					p.template setParameterCallbackWithIndex<NodeType, 1>(&n);
 					p.setRange({ -1.0, 1.0 });
 					p.setDefaultValue(0.0);
 					data.add(std::move(p));
 				}
 				{
 					parameter::data p("Gamma");
-					p.callback = parameter::inner<NodeType, 2>(n);
+					p.template setParameterCallbackWithIndex<NodeType, 2>(&n);
 					p.setRange({ 0.5, 2.0 });
 					p.setSkewForCentre(1.0);
 					p.setDefaultValue(1.0);
@@ -1066,6 +1553,13 @@ namespace control
 
 		struct logic_op
 		{
+			enum class LogicState
+			{
+				Undefined,
+				False,
+				True
+			};
+
 			enum class LogicType
 			{
 				AND,
@@ -1074,7 +1568,7 @@ namespace control
 				numLogicTypes
 			};
 
-			SET_HISE_NODE_ID("logic_op");
+			SN_NODE_ID("logic_op");
 			SN_DESCRIPTION("Combines the (binary) input signals using a logic operator");
 
 			static constexpr bool isNormalisedModulation() { return true; }
@@ -1084,15 +1578,25 @@ namespace control
 				return logicType == other.logicType && leftValue == other.leftValue && rightValue == other.rightValue;
 			}
 
+			void reset()
+			{
+				leftValue = LogicState::Undefined;
+				rightValue = LogicState::Undefined;
+				dirty = false;
+			}
+
 			double getValue() const
 			{
 				dirty = false;
 
+				auto lv = leftValue == LogicState::True;
+				auto rv = rightValue == LogicState::True;
+
 				switch (logicType)
 				{
-				case LogicType::AND: return leftValue && rightValue ? 1.0 : 0.0;
-				case LogicType::OR: return leftValue || rightValue ? 1.0 : 0.0;
-				case LogicType::XOR: return (leftValue || rightValue) && !(leftValue == rightValue) ? 1.0 : 0.0;
+				case LogicType::AND: return lv && rv ? 1.0 : 0.0;
+				case LogicType::OR: return lv || rv ? 1.0 : 0.0;
+				case LogicType::XOR: return (lv || rv) && !(lv == rv) ? 1.0 : 0.0;
                 default: return 0.0;
 				}
                 
@@ -1102,53 +1606,107 @@ namespace control
 			template <int P> void setParameter(double v)
 			{
 				if constexpr (P == 0)
-					leftValue = v > 0.5;
+				{
+					auto prevValue = leftValue;
+					leftValue = LogicState(int(v > 0.5) + 1);
+					dirty |= ((prevValue != leftValue) && (rightValue != LogicState::Undefined));
+				}
+					
 				if constexpr (P == 1)
-					rightValue = v > 0.5;
+				{
+					auto prevValue = rightValue;
+					rightValue = LogicState(int(v > 0.5) + 1);
+					dirty |= ((prevValue != rightValue) && (leftValue != LogicState::Undefined));
+				}
+					
 				if constexpr (P == 2)
+				{
 					logicType = (LogicType)jlimit(0, 2, (int)v);
-
-				dirty = true;
+					dirty = true;
+				}
 			}
 
 			template <typename NodeType> static void createParameters(ParameterDataList& data, NodeType& n)
 			{
 				{
 					parameter::data p("Left");
-					p.callback = parameter::inner<NodeType, 0>(n);
+					p.template setParameterCallbackWithIndex<NodeType, 0>(&n);
 					p.setRange({ 0.0, 1.0 });
 					p.setDefaultValue(0.0);
 					data.add(std::move(p));
 				}
 				{
 					parameter::data p("Right");
-					p.callback = parameter::inner<NodeType, 1>(n);
+					p.template setParameterCallbackWithIndex<NodeType, 1>(&n);
 					p.setRange({ 0.0, 1.0 });
 					p.setDefaultValue(0.0);
 					data.add(std::move(p));
 				}
 				{
 					parameter::data p("Operator");
-					p.callback = parameter::inner<NodeType, 2>(n);
+					p.template setParameterCallbackWithIndex<NodeType, 2>(&n);
 					p.setParameterValueNames({ "AND", "OR", "XOR" });
 					p.setDefaultValue(0.0);
 					data.add(std::move(p));
 				}
 			}
 
-			bool leftValue = false;
-			bool rightValue = false;
+			LogicState leftValue = LogicState::Undefined;
+			LogicState rightValue = LogicState::Undefined;
 			LogicType logicType = LogicType::AND;
 			mutable bool dirty = false;
 
 		};
 
-		struct minmax
+		struct change: public pimpl::no_mod_normalisation
 		{
-			SET_HISE_NODE_ID("minmax");
+			SN_NODE_ID("change");
+			SN_DESCRIPTION("Filters out repetitions of the same value");
+
+			change() :
+				no_mod_normalisation(getStaticId(), { "Value" })
+			{};
+
+			bool operator==(const change& other) const { return other.value == value; }
+
+			double getValue() const
+			{
+				dirty = false;
+				return value;
+			}
+
+			template <int P> void setParameter(double v)
+			{
+				if constexpr (P == 0)
+				{
+					dirty = v != value;
+					value = v;
+				}
+			}
+
+			template <typename NodeType> static void createParameters(ParameterDataList& data, NodeType& n)
+			{
+				{
+					parameter::data p("Value");
+					p.template setParameterCallbackWithIndex<NodeType, 0>(&n);
+					p.setRange({ 0.0, 1.0 });
+					p.setDefaultValue(0.0);
+					data.add(std::move(p));
+				}
+			}
+
+			double value = 0.0;
+			mutable bool dirty = false;
+		};
+
+		struct minmax: public pimpl::no_mod_normalisation
+		{
+			SN_NODE_ID("minmax");
 			SN_DESCRIPTION("Scales the input value to a modifyable range");
 
-			static constexpr bool isNormalisedModulation() { return false; }
+			minmax() :
+				no_mod_normalisation(getStaticId(), {}) // no unscaled input parameters...
+			{};
 
 			bool operator==(const minmax& other) const { return other.range == range && value == other.value; }
 
@@ -1184,28 +1742,28 @@ namespace control
 			{
 				{
 					parameter::data p("Value");
-					p.callback = parameter::inner<NodeType, 0>(n);
+					p.template setParameterCallbackWithIndex<NodeType, 0>(&n);
 					p.setRange({ 0.0, 1.0 });
 					p.setDefaultValue(0.0);
 					data.add(std::move(p));
 				}
 				{
 					parameter::data p("Minimum");
-					p.callback = parameter::inner<NodeType, 1>(n);
+					p.template setParameterCallbackWithIndex<NodeType, 1>(&n);
 					p.setRange({ 0.0, 1.0 });
 					p.setDefaultValue(0.0);
 					data.add(std::move(p));
 				}
 				{
 					parameter::data p("Maximum");
-					p.callback = parameter::inner<NodeType, 2>(n);
+					p.template setParameterCallbackWithIndex<NodeType, 2>(&n);
 					p.setRange({ 0.0, 1.0 });
 					p.setDefaultValue(1.0);
 					data.add(std::move(p));
 				}
 				{
 					parameter::data p("Skew");
-					p.callback = parameter::inner<NodeType, 3>(n);
+					p.template setParameterCallbackWithIndex<NodeType, 3>(&n);
 					p.setRange({ 0.1, 10.0 });
 					p.setSkewForCentre(1.0);
 					p.setDefaultValue(1.0);
@@ -1213,15 +1771,14 @@ namespace control
 				}
 				{
 					parameter::data p("Step");
-					p.callback = parameter::inner<NodeType, 4>(n);
+					p.template setParameterCallbackWithIndex<NodeType, 4>(&n);
 					p.setRange({ 0.0, 1.0 });
 					p.setDefaultValue(0.0);
 					data.add(std::move(p));
 				}
                 {
                     parameter::data p("Polarity");
-                    p.callback = parameter::inner<NodeType, 5>(n);
-                    p.setRange({ 0.0, 1.0, 1.0 });
+					p.template setParameterCallbackWithIndex<NodeType, 5>(&n);
                     p.setParameterValueNames({"Normal", "Inverted"});
                     p.setDefaultValue(0.0);
                     data.add(std::move(p));
@@ -1233,18 +1790,9 @@ namespace control
 			mutable bool dirty = false;
 		};
 
-		struct pma
+		struct pma_base
 		{
-			SET_HISE_NODE_ID("pma");
-			SN_DESCRIPTION("Scales and offsets a modulation signal");
-
-			static constexpr bool isNormalisedModulation() { return true; }
-
-			double getValue() const 
-			{ 
-				dirty = false; 
-				return jlimit(0.0, 1.0, value * mulValue + addValue); 
-			}
+			virtual ~pma_base() {};
 
 			template <int P> void setParameter(double v)
 			{
@@ -1262,21 +1810,21 @@ namespace control
 			{
 				{
 					parameter::data p("Value");
-					p.callback = parameter::inner<NodeType, 0>(n);
+					p.template setParameterCallbackWithIndex<NodeType, 0>(&n);
 					p.setRange({ 0.0, 1.0 });
 					p.setDefaultValue(0.0);
 					data.add(std::move(p));
 				}
 				{
 					parameter::data p("Multiply");
-					p.callback = parameter::inner<NodeType, 1>(n);
+					p.template setParameterCallbackWithIndex<NodeType, 1>(&n);
 					p.setRange({ -1.0, 1.0 });
 					p.setDefaultValue(1.0);
 					data.add(std::move(p));
 				}
 				{
 					parameter::data p("Add");
-					p.callback = parameter::inner<NodeType, 2>(n);
+					p.template setParameterCallbackWithIndex<NodeType, 2>(&n);
 					p.setRange({ -1.0, 1.0 });
 					p.setDefaultValue(0.0);
 					data.add(std::move(p));
@@ -1287,6 +1835,39 @@ namespace control
 			double mulValue = 1.0;
 			double addValue = 0.0;
 			mutable bool dirty = false;
+		};
+
+		struct pma_unscaled: public pma_base,
+							 public pimpl::no_mod_normalisation
+		{
+			SN_NODE_ID("pma_unscaled");
+			SN_DESCRIPTION("multiplies and adds an offset to an unscaled modulation signal");
+
+			static constexpr bool isNormalisedModulation() { return false; }
+
+			pma_unscaled() :
+				no_mod_normalisation(getStaticId(), { "Value", "Add" })
+			{};
+
+			double getValue() const
+			{
+				dirty = false;
+				return value * mulValue + addValue;
+			}
+		};
+
+		struct pma: public pma_base
+		{
+			SN_NODE_ID("pma");
+			SN_DESCRIPTION("Scales and offsets a modulation signal");
+
+			static constexpr bool isNormalisedModulation() { return true; }
+
+			double getValue() const
+			{
+				dirty = false;
+				return jlimit(0.0, 1.0, value * mulValue + addValue);
+			}
 		};
 	}
 
@@ -1301,7 +1882,7 @@ namespace control
 	{
 		static constexpr int NumVoices = NV;
 
-		SET_HISE_POLY_NODE_ID(DataType::getStaticId());
+		SN_POLY_NODE_ID(DataType::getStaticId());
 		SN_GET_SELF_AS_OBJECT(multi_parameter);
 		SN_DESCRIPTION(DataType::getDescription());
 		
@@ -1321,7 +1902,7 @@ namespace control
 
 			typed->sendPending();
 		}
-        PARAMETER_MEMBER_FUNCTION;
+        SN_PARAMETER_MEMBER_FUNCTION;
 
 		void sendPending()
 		{
@@ -1334,7 +1915,8 @@ namespace control
 
 				auto& d = data.get();
 
-				this->getParameter().call(d.getValue());
+				if(d.dirty)
+					this->getParameter().call(d.getValue());
 			}
 			else
 			{
@@ -1351,6 +1933,15 @@ namespace control
 		template <typename T> void process(T&)
 		{
 			sendPending();
+		}
+
+		void reset()
+		{
+			if constexpr (prototypes::check::reset<DataType>::value)
+			{
+				for (auto& d : data)
+					d.reset();
+			}
 		}
 
 		template <typename T> void processFrame(T&)
@@ -1380,9 +1971,13 @@ namespace control
 	};
 
 	template <int NV, typename ParameterType> using pma = multi_parameter<NV, ParameterType, multilogic::pma>;
+	template <int NV, typename ParameterType> using pma_unscaled = multi_parameter<NV, ParameterType, multilogic::pma_unscaled>;
 	template <int NV, typename ParameterType> using bipolar = multi_parameter<NV, ParameterType, multilogic::bipolar>;
 	template <int NV, typename ParameterType> using minmax = multi_parameter<NV, ParameterType, multilogic::minmax>;
 	template <int NV, typename ParameterType> using logic_op = multi_parameter<NV, ParameterType, multilogic::logic_op>;
+	template <int NV, typename ParameterType> using intensity = multi_parameter<NV, ParameterType, multilogic::intensity>;
+	template <int NV, typename ParameterType> using bang = multi_parameter<NV, ParameterType, multilogic::bang>;
+	template <int NV, typename ParameterType> using change = multi_parameter<NV, ParameterType, multilogic::change>;
 
 	struct smoothed_parameter_base: public mothernode
 	{
@@ -1390,9 +1985,10 @@ namespace control
 		virtual smoothers::base* getSmootherObject() = 0;
 	};
 
-	template <int NV, typename SmootherClass> struct smoothed_parameter: public control::pimpl::templated_mode,
-                                                                         public polyphonic_base,
-																		 public smoothed_parameter_base
+	template <int NV, typename SmootherClass, bool IsScaled> 
+	struct smoothed_parameter_pimpl: public control::pimpl::templated_mode,
+                                     public polyphonic_base,
+									 public smoothed_parameter_base
 	{
 		static constexpr int NumVoices = NV;
 
@@ -1403,27 +1999,34 @@ namespace control
 			Enabled
 		};
 
-		smoothed_parameter():
+		smoothed_parameter_pimpl():
           polyphonic_base(getStaticId(), false),
           templated_mode(getStaticId(), "smoothers")
 		{
+			if (!IsScaled)
+			{
+				cppgen::CustomNodeProperties::addNodeIdManually(getStaticId(), PropertyIds::UseUnnormalisedModulation);
+				cppgen::CustomNodeProperties::addUnscaledParameter(getStaticId(), "Value");
+			}
+
             cppgen::CustomNodeProperties::setPropertyForObject(*this, PropertyIds::TemplateArgumentIsPolyphonic);
             
 			static_assert(std::is_base_of<smoothers::base, SmootherClass>(), "Not a smoother class");
 			static_assert(SmootherClass::NumVoices == NumVoices, "Voice amount mismatch");
 		}
 
-		SET_HISE_NODE_ID("smoothed_parameter");
-		SN_GET_SELF_AS_OBJECT(smoothed_parameter);
+		static Identifier getStaticId() { return IsScaled ? "smoothed_parameter" : "smoothed_parameter_unscaled"; };
+
+		SN_GET_SELF_AS_OBJECT(smoothed_parameter_pimpl);
 		SN_DESCRIPTION("Smoothes an incoming modulation signal");
 
 		DEFINE_PARAMETERS
 		{
-			DEF_PARAMETER(Value, smoothed_parameter);
-			DEF_PARAMETER(SmoothingTime, smoothed_parameter);
-			DEF_PARAMETER(Enabled, smoothed_parameter);
+			DEF_PARAMETER(Value, smoothed_parameter_pimpl);
+			DEF_PARAMETER(SmoothingTime, smoothed_parameter_pimpl);
+			DEF_PARAMETER(Enabled, smoothed_parameter_pimpl);
 		}
-		PARAMETER_MEMBER_FUNCTION;
+		SN_PARAMETER_MEMBER_FUNCTION;
 
 
 		void initialise(NodeBase* n)
@@ -1431,9 +2034,9 @@ namespace control
 			value.initialise(n);
 		}
 
-		HISE_EMPTY_HANDLE_EVENT;
+		SN_EMPTY_HANDLE_EVENT;
 
-		static constexpr bool isNormalisedModulation() { return true; };
+		static constexpr bool isNormalisedModulation() { return IsScaled; };
 
 		static constexpr bool isPolyphonic() { return NumVoices > 1; };
 
@@ -1475,18 +2078,18 @@ namespace control
 		void createParameters(ParameterDataList& data)
 		{
 			{
-				DEFINE_PARAMETERDATA(smoothed_parameter, Value);
+				DEFINE_PARAMETERDATA(smoothed_parameter_pimpl, Value);
 				p.setRange({ 0.0, 1.0 });
 				data.add(std::move(p));
 			}
 			{
-				DEFINE_PARAMETERDATA(smoothed_parameter, SmoothingTime);
+				DEFINE_PARAMETERDATA(smoothed_parameter_pimpl, SmoothingTime);
 				p.setRange({ 0.1, 1000.0, 0.1 });
 				p.setDefaultValue(100.0);
 				data.add(std::move(p));
 			}
 			{
-				DEFINE_PARAMETERDATA(smoothed_parameter, Enabled);
+				DEFINE_PARAMETERDATA(smoothed_parameter_pimpl, Enabled);
 				p.setRange({ 0.0, 1.0, 1.0 });
 				p.setDefaultValue(1.0);
 				data.add(std::move(p));
@@ -1512,5 +2115,8 @@ namespace control
 		ModValue modValue;
 	};
 
+	template <int NV, typename SmootherClass> using smoothed_parameter = smoothed_parameter_pimpl<NV, SmootherClass, true>;
+	template <int NV, typename SmootherClass> using smoothed_parameter_unscaled = smoothed_parameter_pimpl<NV, SmootherClass, false>;
 }
+
 }

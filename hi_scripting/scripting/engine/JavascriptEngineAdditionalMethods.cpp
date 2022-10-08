@@ -37,11 +37,24 @@
 
 namespace hise { using namespace juce;
 
+
+
+
+
 bool HiseJavascriptEngine::isJavascriptFunction(const var& v)
 {
 	if (auto obj = v.getObject())
+		return dynamic_cast<WeakCallbackHolder::CallableObject*>(obj) != nullptr;
+
+	return false;
+}
+
+
+bool HiseJavascriptEngine::isInlineFunction(const var& v)
+{
+	if (auto obj = v.getObject())
 	{
-		return dynamic_cast<RootObject::FunctionObject*>(obj) || dynamic_cast<RootObject::InlineFunction::Object*>(obj);
+		return dynamic_cast<RootObject::InlineFunction::Object*>(obj);
 	}
 
 	return false;
@@ -59,6 +72,91 @@ HiseJavascriptEngine::HiseJavascriptEngine(JavascriptProcessor *p) : maximumExec
 	registerNativeObject(RootObject::IntegerClass::getClassName(), new RootObject::IntegerClass());
 }
 
+bool HiseJavascriptEngine::RootObject::JavascriptNamespace::optimiseFunction(OptimizationPass::OptimizationResult& r, var function, OptimizationPass* p)
+{
+	if (auto fo = dynamic_cast<InlineFunction::Object*>(function.getObject()))
+	{
+		if (fo->body != nullptr)
+		{
+			auto tr = p->executePass(fo->body);
+			r.numOptimizedStatements += tr.numOptimizedStatements;
+			return true;
+		}
+	}
+	else if (auto fo = dynamic_cast<FunctionObject*>(function.getObject()))
+	{
+		auto tr = p->executePass(fo->body);
+		r.numOptimizedStatements += tr.numOptimizedStatements;
+		return true;
+	}
+
+	return false;
+}
+
+hise::HiseJavascriptEngine::RootObject::OptimizationPass::OptimizationResult HiseJavascriptEngine::RootObject::JavascriptNamespace::runOptimisation(OptimizationPass* p)
+{
+	OptimizationPass::OptimizationResult r;
+	r.passName = p->getPassName();
+
+	for (auto o : inlineFunctions)
+	{
+		optimiseFunction(r, var(o), p);
+	}
+
+	for (auto& co : constObjects)
+	{
+		if (auto cso = dynamic_cast<ApiClass*>(co.value.getObject()))
+		{
+			auto fList = cso->getListOfOptimizableFunctions();
+
+			if (fList.isArray())
+			{
+				for (auto& f : *fList.getArray())
+					optimiseFunction(r, f, p);
+			}
+			else
+				jassertfalse;
+		}
+	}
+
+	return r;
+}
+
+HiseJavascriptEngine::RootObject::OptimizationPass::OptimizationResult HiseJavascriptEngine::RootObject::HiseSpecialData::runOptimisation(OptimizationPass* p)
+{
+	auto r = JavascriptNamespace::runOptimisation(p);
+
+	for (auto api : this->apiClasses)
+	{
+		auto list = api->getListOfOptimizableFunctions();
+
+		for (auto f : *list.getArray())
+			optimiseFunction(r, f, p);
+	}
+
+	for (auto& nv : this->root->getProperties())
+	{
+		optimiseFunction(r, nv.value, p);
+	}
+
+	for (auto n : namespaces)
+	{
+		auto tr = n->runOptimisation(p);
+		r.numOptimizedStatements += tr.numOptimizedStatements;
+	}
+
+	for (auto c : callbackNEW)
+	{
+		if (c->statements != nullptr)
+		{
+			auto tr = p->executePass(c->statements);
+			r.numOptimizedStatements += tr.numOptimizedStatements;
+		}
+	}
+
+	return r;
+}
+
 HiseJavascriptEngine::RootObject::RootObject() :
 hiseSpecialData(this)
 {
@@ -71,7 +169,10 @@ hiseSpecialData(this)
 	setMethod("trace", trace);
 	setMethod("charToInt", charToInt);
 	setMethod("parseInt", IntegerClass::parseInt);
+	setMethod("parseFloat", IntegerClass::parseFloat);
 	setMethod("typeof", typeof_internal);
+
+	
 }
 
 
@@ -195,6 +296,10 @@ var HiseJavascriptEngine::RootObject::FunctionCall::getResult(const Scope& s) co
 				HiseJavascriptEngine::checkValidParameter(i, parameters[i], location);
 			}
 				
+#if ENABLE_SCRIPTING_BREAKPOINTS
+			if(constObject->wantsCurrentLocation())
+				constObject->setCurrentLocation(object->location.externalFile, object->location.getCharIndex());
+#endif
 
 			return constObject->callFunction(functionIndex, parameters, numArgs);
 		}
@@ -232,10 +337,24 @@ var HiseJavascriptEngine::RootObject::FunctionCall::getResult(const Scope& s) co
 					return obj->performDynamically(s, parameters, arguments.size());
 				}
 			}
+			if (thisObject.isArray())
+			{
+				if (auto sf = ArrayClass::getScopedFunction(dot->child))
+				{
+					s.checkTimeOut(location);
+					Array<var> argVars;
+
+					for (auto* a : arguments)
+						argVars.add(a->getResult(s));
+
+					const var::NativeFunctionArgs args(thisObject, argVars.begin(), argVars.size());
+
+					return sf(args, s);
+				}
+			}
 
 			return invokeFunction(s, s.findFunctionCall(location, thisObject, dot->child), thisObject);
 		}
-
 
 		var r = object->getResult(s);
 
@@ -308,7 +427,11 @@ var HiseJavascriptEngine::callExternalFunctionRaw(var function, const var::Nativ
 	}
 	else if (auto ifo = dynamic_cast<RootObject::InlineFunction::Object*>(function.getObject()))
 	{
-		return ifo->performDynamically(RootObject::Scope(nullptr, root.get(), root.get()), const_cast<var*>(args.arguments), args.numArguments);
+		RootObject::ScopedLocalThisObject sto(*root, args.thisObject);
+
+		auto rv = ifo->performDynamically(RootObject::Scope(nullptr, root.get(), root.get()), const_cast<var*>(args.arguments), args.numArguments);
+
+		return rv;
 	}
     
     return var();
@@ -347,7 +470,8 @@ var HiseJavascriptEngine::callExternalFunction(var function, const var::NativeFu
 	{
 		static const Identifier func("function");
 
-		if (result != nullptr) *result = Result::fail(root->dumpCallStack(e, func));
+		if (result != nullptr && root != nullptr)
+            *result = Result::fail(root->dumpCallStack(e, func));
 	}
 	catch (Breakpoint& bp)
 	{
@@ -355,7 +479,8 @@ var HiseJavascriptEngine::callExternalFunction(var function, const var::NativeFu
 		sendBreakpointMessage(bp.index);
 
 		static const Identifier func("function");
-		if (result != nullptr) *result = Result::fail(root->dumpCallStack(RootObject::Error::fromBreakpoint(bp), func));
+		if (result != nullptr && root != nullptr)
+            *result = Result::fail(root->dumpCallStack(RootObject::Error::fromBreakpoint(bp), func));
 	}
 
 	return returnVal;
@@ -376,6 +501,7 @@ root(root_)
 		hiddenProperties.addIfNotAlreadyThere(Identifier("trace"));
 		hiddenProperties.addIfNotAlreadyThere(Identifier("charToInt"));
 		hiddenProperties.addIfNotAlreadyThere(Identifier("parseInt"));
+		hiddenProperties.addIfNotAlreadyThere(Identifier("parseFloat"));
 		hiddenProperties.addIfNotAlreadyThere(Identifier("typeof"));
 		hiddenProperties.addIfNotAlreadyThere(Identifier("Object"));
 		//hiddenProperties.addIfNotAlreadyThere(Identifier("Array"));
@@ -398,6 +524,7 @@ root(root_)
 	{
 		callbackTimes[i] = 0.0;
 	}
+
 }
 
 HiseJavascriptEngine::RootObject::HiseSpecialData::~HiseSpecialData()
@@ -674,7 +801,9 @@ DebugInformation* HiseJavascriptEngine::RootObject::JavascriptNamespace::createD
 			return var();
 		};
 
-		DebugInformation* di = new LambdaValueInformation(vf, varRegister.getRegisterId(index), id, DebugInformation::Type::RegisterVariable, registerLocations[index]);
+		auto rid = varRegister.getRegisterId(index);
+
+		DebugInformation* di = new LambdaValueInformation(vf, rid, id, DebugInformation::Type::RegisterVariable, registerLocations[index], comments[rid].toString());
 		return di;
 	}
 
@@ -687,7 +816,7 @@ DebugInformation* HiseJavascriptEngine::RootObject::JavascriptNamespace::createD
 
 		InlineFunction::Object *o = dynamic_cast<InlineFunction::Object*>(inlineFunctions.getUnchecked(inlineIndex).get());
 
-		return new DebugableObjectInformation(o, o->name, DebugInformation::Type::InlineFunction, id);
+		return new DebugableObjectInformation(o, o->name, DebugInformation::Type::InlineFunction, id, o->getComment());
 	}
 
 	prevLimit = upperLimit;
@@ -708,7 +837,13 @@ DebugInformation* HiseJavascriptEngine::RootObject::JavascriptNamespace::createD
 			return var();
 		};
 
-		DebugInformation* di = new LambdaValueInformation(vf, constObjects.getName(constIndex), id, DebugInformation::Type::Constant, constLocations[constIndex]);
+		auto cid = constObjects.getName(constIndex);
+
+		DebugInformation* di = new LambdaValueInformation(vf, 
+													      cid, 
+														  id, 
+														  DebugInformation::Type::Constant, constLocations[constIndex],
+														  comments[cid].toString());
 	
 		return di;
 	}
@@ -1004,6 +1139,7 @@ var HiseJavascriptEngine::executeCallback(int callbackIndex, Result *result)
 	return var();
 }
 
+
 void HiseJavascriptEngine::RootObject::Callback::setStatements(BlockStatement *s) noexcept
 {
 	statements = s;
@@ -1024,6 +1160,7 @@ var HiseJavascriptEngine::RootObject::Callback::perform(RootObject *root)
 	root->addToCallStack(callbackName, nullptr);
 
 
+    LocalScopeCreator::ScopedSetter svs(root, this);
 
 	statements->perform(s, &returnValue);
 

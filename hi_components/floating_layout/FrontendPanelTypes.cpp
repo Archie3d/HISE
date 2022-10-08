@@ -34,6 +34,11 @@
 
 namespace hise { using namespace juce;
 
+void MatrixPeakMeter::fillModuleList(StringArray& moduleList)
+{
+    fillModuleListWithType<RoutableProcessor>(moduleList);
+}
+
 ActivityLedPanel::ActivityLedPanel(FloatingTile* parent) :
 	FloatingTileContent(parent)
 {
@@ -262,6 +267,14 @@ void MidiKeyboardPanel::restoreInternal(const var& object)
 	auto endChannel = (int)getPropertyWithDefault(object, SpecialPanelIds::MPEEndChannel);
 
 	mpeZone = { startChannel, endChannel };
+
+	auto bgColour = findPanelColour(PanelColourId::bgColour);
+
+	if (bgColour.isTransparent())
+	{
+		keyboard->asComponent()->setColour(juce::MidiKeyboardComponent::ColourIds::shadowColourId, bgColour);
+		keyboard->asComponent()->setColour(juce::MidiKeyboardComponent::ColourIds::keySeparatorLineColourId, bgColour);
+	}
 
 	if (keyboard->isMPEKeyboard())
 	{
@@ -585,6 +598,8 @@ var PresetBrowserPanel::toDynamicObject() const
 	storePropertyInObject(obj, SpecialPanelIds::ListAreaOffset, var(options.listAreaOffset));
 	storePropertyInObject(obj, SpecialPanelIds::ColumnRowPadding, var(options.columnRowPadding));
 	storePropertyInObject(obj, SpecialPanelIds::SearchBarBounds, var(options.searchBarBounds));
+	storePropertyInObject(obj, SpecialPanelIds::MoreButtonBounds, var(options.moreButtonBounds));
+	storePropertyInObject(obj, SpecialPanelIds::SaveButtonBounds, var(options.saveButtonBounds));
 	storePropertyInObject(obj, SpecialPanelIds::FavoriteButtonBounds, var(options.favoriteButtonBounds));
 
 	return obj;
@@ -639,7 +654,21 @@ void PresetBrowserPanel::fromDynamicObject(const var& object)
 	{
 		options.favoriteButtonBounds.clear();
 		options.favoriteButtonBounds.addArray(*favoriteButtonBounds.getArray());
-	}	
+	}
+
+	auto moreButtonBounds = getPropertyWithDefault(object, SpecialPanelIds::MoreButtonBounds);
+	if (moreButtonBounds.isArray())
+	{
+		options.moreButtonBounds.clear();
+		options.moreButtonBounds.addArray(*moreButtonBounds.getArray());
+	}
+
+	auto saveButtonBounds = getPropertyWithDefault(object, SpecialPanelIds::SaveButtonBounds);
+	if (saveButtonBounds.isArray())
+	{
+		options.saveButtonBounds.clear();
+		options.saveButtonBounds.addArray(*saveButtonBounds.getArray());
+	}
 	
 	options.showFavoriteIcons = getPropertyWithDefault(object, SpecialPanelIds::ShowFavoriteIcon);
 	options.backgroundColour = findPanelColour(PanelColourId::bgColour);
@@ -680,6 +709,8 @@ juce::Identifier PresetBrowserPanel::getDefaultablePropertyId(int index) const
 	RETURN_DEFAULT_PROPERTY_ID(index, SpecialPanelIds::ColumnRowPadding, "ColumnRowPadding");
 	RETURN_DEFAULT_PROPERTY_ID(index, SpecialPanelIds::SearchBarBounds, "SearchBarBounds");
 	RETURN_DEFAULT_PROPERTY_ID(index, SpecialPanelIds::FavoriteButtonBounds, "FavoriteButtonBounds");
+	RETURN_DEFAULT_PROPERTY_ID(index, SpecialPanelIds::SaveButtonBounds, "SaveButtonBounds");
+	RETURN_DEFAULT_PROPERTY_ID(index, SpecialPanelIds::MoreButtonBounds, "MoreButtonBounds");
 	RETURN_DEFAULT_PROPERTY_ID(index, SpecialPanelIds::NumColumns, "NumColumns");
 	RETURN_DEFAULT_PROPERTY_ID(index, SpecialPanelIds::ColumnWidthRatio, "ColumnWidthRatio");
 	RETURN_DEFAULT_PROPERTY_ID(index, SpecialPanelIds::ShowExpansionsAsColumn, "ShowExpansionsAsColumn");
@@ -722,11 +753,11 @@ var PresetBrowserPanel::getDefaultProperty(int index) const
 	Array<var> defaultColumnRowPadding = {0, 0, 0, 0};
 	RETURN_DEFAULT_PROPERTY(index, SpecialPanelIds::ColumnRowPadding, var(defaultColumnRowPadding));
 
-	Array<var> defaultSearchBarBounds;
-	RETURN_DEFAULT_PROPERTY(index, SpecialPanelIds::SearchBarBounds, var(defaultSearchBarBounds));
-
-	Array<var> defaultFavoriteButtonBounds;
-	RETURN_DEFAULT_PROPERTY(index, SpecialPanelIds::FavoriteButtonBounds, var(defaultFavoriteButtonBounds));
+	Array<var> emptyArray;
+	RETURN_DEFAULT_PROPERTY(index, SpecialPanelIds::SearchBarBounds, var(emptyArray));
+	RETURN_DEFAULT_PROPERTY(index, SpecialPanelIds::FavoriteButtonBounds, var(emptyArray));
+	RETURN_DEFAULT_PROPERTY(index, SpecialPanelIds::SaveButtonBounds, var(emptyArray));
+	RETURN_DEFAULT_PROPERTY(index, SpecialPanelIds::MoreButtonBounds, var(emptyArray));
 
 	return var();
 }
@@ -1279,7 +1310,7 @@ void TableFloatingTileBase::initTable()
 
 	table.getHeader().addColumn(getIndexName(), CCNumber, fWidth, fWidth, fWidth);
 	table.getHeader().addColumn("Parameter", ParameterName, 70);
-	table.getHeader().addColumn("Inverted", Inverted, 50, 50, 50);
+	table.getHeader().addColumn("Inverted", Inverted, 70, 70, 70);
 	table.getHeader().addColumn("Min", Minimum, 70, 70, 70);
 	table.getHeader().addColumn("Max", Maximum, 70, 70, 70);
 	table.getHeader().setStretchToFitActive(true);

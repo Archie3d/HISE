@@ -238,8 +238,8 @@ template <typename DataType, CloneProcessType ProcessType>
     constexpr auto& getObject() { return *this; }
 	constexpr const auto& getObject() const { return *this; }
 
-	constexpr auto& getWrappedObject() { return *DataType::Iterator<false>(cloneData).begin(); }
-	constexpr const auto& getWrappedObject() const { return *DataType::Iterator<false>(cloneData).begin(); }
+	constexpr auto& getWrappedObject() { return *DataType:: template Iterator<false>(cloneData).begin(); }
+	constexpr const auto& getWrappedObject() const { return *DataType:: template Iterator<false>(cloneData).begin(); }
 
     static constexpr int NumChannels = DataType::ObjectType::NumChannels;
     
@@ -288,7 +288,7 @@ template <typename DataType, CloneProcessType ProcessType>
 			typed->setCloneProcessType(v);
 	}
 
-	PARAMETER_MEMBER_FUNCTION;
+	SN_PARAMETER_MEMBER_FUNCTION;
 
 	void initialise(NodeBase* n)
 	{
@@ -400,7 +400,7 @@ template <typename DataType, CloneProcessType ProcessType>
                 FloatVectorOperations::clear(d.getRawDataPointers()[i], d.getNumSamples());
         }
         
-		auto wcd = snex::Types::ProcessDataHelpers<NumChannels>::makeChannelData(workBuffer);
+		auto wcd = snex::Types::ProcessDataHelpers<NumChannels>::makeChannelData(workBuffer, d.getNumSamples());
         ProcessData<NumChannels> wd(wcd.begin(), d.getNumSamples());
         wd.copyNonAudioDataFrom(d);
         

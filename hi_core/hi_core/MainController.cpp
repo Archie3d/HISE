@@ -221,6 +221,7 @@ void MainController::clearPreset()
 {
 	Processor::Iterator<Processor> iter(getMainSynthChain(), false);
 
+    
 	while (auto p = iter.getNextProcessor())
 		p->cleanRebuildFlagForThisAndParents();
 
@@ -232,7 +233,8 @@ void MainController::clearPreset()
 		mc->getMacroManager().getMidiControlAutomationHandler()->getMPEData().clear();
 		mc->getScriptComponentEditBroadcaster()->getUndoManager().clearUndoHistory();
 		mc->getControlUndoManager()->clearUndoHistory();
-
+        mc->getLocationUndoManager()->clearUndoHistory();
+        
 		mc->setGlobalRoutingManager(nullptr);
 
 		BACKEND_ONLY(mc->getJavascriptThreadPool().getGlobalServer()->setInitialised());
@@ -247,7 +249,9 @@ void MainController::clearPreset()
 		mc->setCurrentScriptLookAndFeel(nullptr);
 		mc->clearIncludedFiles();
 		mc->changed = false;
-
+        
+        mc->prepareToPlay(mc->sampleRate, mc->numSamplesThisBlock);
+        
 		return SafeFunctionCall::OK;
 	};
 
@@ -331,6 +335,8 @@ void MainController::loadPresetInternal(const ValueTree& v)
 
 			getSampleManager().setCurrentPreloadMessage("Compiling scripts...");
 
+			getMacroManager().getMidiControlAutomationHandler()->setUnloadedData(v.getChildWithName("MidiAutomation"));
+
 			synthChain->compileAllScripts();
 
 			if (sampleRate > 0.0)
@@ -341,12 +347,9 @@ void MainController::loadPresetInternal(const ValueTree& v)
 				prepareToPlay(sampleRate, maxBufferSize.get());
 			}
 
-			ValueTree autoData = v.getChildWithName("MidiAutomation");
-
 			// We need to postpone this until after compilation in order to resolve the 
 			// attribute indexes for the CC mappings
-			if (autoData.isValid())
-				getMacroManager().getMidiControlAutomationHandler()->restoreFromValueTree(autoData);
+			getMacroManager().getMidiControlAutomationHandler()->loadUnloadedData();
 
 			synthChain->loadMacrosFromValueTree(v);
 
@@ -493,6 +496,16 @@ void MainController::killAndCallOnLoadingThread(const ProcessorFunction& f)
 	getKillStateHandler().killVoicesAndCall(getMainSynthChain(), f, KillStateHandler::SampleLoadingThread);
 }
 
+void MainController::sendToMidiOut(const HiseEvent& e)
+{
+	// Only send out artificial notes
+	jassert(e.isArtificial());
+
+	SimpleReadWriteLock::ScopedWriteLock sl(midiOutputLock);
+
+	outputMidiBuffer.addEvent(e);
+}
+
 bool MainController::refreshOversampling()
 {
 	auto requiredOversamplingFactor = (double)jlimit(1, 8, nextPowerOfTwo((int)(minimumSamplerate / getOriginalSamplerate())));
@@ -534,6 +547,29 @@ bool MainController::refreshOversampling()
 	}
 
 	return false;
+}
+
+
+
+void MainController::processMidiOutBuffer(MidiBuffer& mb, int numSamples)
+{
+	if (auto sl = SimpleReadWriteLock::ScopedTryReadLock(midiOutputLock))
+	{
+		if (!outputMidiBuffer.isEmpty())
+		{
+			HiseEventBuffer thisTime;
+			outputMidiBuffer.moveEventsBelow(thisTime, numSamples);
+
+			HiseEventBuffer::Iterator it(thisTime);
+
+			while (auto e = it.getNextEventPointer(true, false))
+			{
+				mb.addEvent(e->toMidiMesage(), e->getTimeStamp());
+			}
+
+			outputMidiBuffer.subtractFromTimeStamps(numSamples);
+		}
+	}
 }
 
 bool MainController::shouldUseSoftBypassRamps() const noexcept
@@ -613,6 +649,8 @@ void MainController::stopBufferToPlay()
 {
 	if (previewBufferIndex != -1)
 	{
+		bool sendToListeners = true;
+
 		{
 			LockHelpers::SafeLock sl(this, LockHelpers::AudioLock);
 
@@ -622,12 +660,16 @@ void MainController::stopBufferToPlay()
 			{
 				fadeOutPreviewBufferGain = 1.0f;
 				fadeOutPreviewBuffer = true;
+				sendToListeners = false;
 			}
 		}
 
-		for (auto pl : previewListeners)
+		if (sendToListeners)
 		{
-			pl->previewStateChanged(false, previewBuffer);
+			for (auto pl : previewListeners)
+			{
+				pl->previewStateChanged(false, previewBuffer);
+			}
 		}
 	}
 }
@@ -715,11 +757,7 @@ hise::RLottieManager::Ptr MainController::getRLottieManager()
 
 		if (!r.wasOk())
 		{
-#if USE_BACKEND
-			debugToConsole(getMainSynthChain(), r.getErrorMessage());
-#else
-			sendOverlayMessage(DeactiveOverlay::CustomErrorMessage, r.getErrorMessage());
-#endif
+			sendOverlayMessage(OverlayMessageBroadcaster::CustomErrorMessage, r.getErrorMessage());
 		}
 	}
 
@@ -812,7 +850,10 @@ void MainController::processBlockCommon(AudioSampleBuffer &buffer, MidiBuffer &m
 		int maxAligned = maxEventTimestamp - maxEventTimestamp % HISE_EVENT_RASTER;
 
 		for (auto& e : masterEventBuffer)
-			e.setTimeStamp(jmin(maxAligned, e.getTimeStamp()));
+		{
+			if (e.getTimeStamp() > maxAligned)
+				e.setTimeStamp(maxAligned);
+		}
 	}
 
 	handleSuspendedNoteOffs();
@@ -832,11 +873,29 @@ void MainController::processBlockCommon(AudioSampleBuffer &buffer, MidiBuffer &m
 
 #if ENABLE_HOST_INFO
 	AudioPlayHead::CurrentPositionInfo newTime;
+	MasterClock::GridInfo gridInfo;
 
-	if (thisAsProcessor->getPlayHead() != nullptr && thisAsProcessor->getPlayHead()->getCurrentPosition(newTime))
+	bool useTime = false;
+
+	if (getMasterClock().allowExternalSync() && thisAsProcessor->getPlayHead() != nullptr)
 	{
-		handleTransportCallbacks(newTime);
+		useTime = thisAsProcessor->getPlayHead()->getCurrentPosition(newTime);
+	}
 
+	if (getMasterClock().shouldCreateInternalInfo(newTime))
+	{
+		gridInfo = getMasterClock().processAndCheckGrid(buffer.getNumSamples(), newTime);
+		newTime = getMasterClock().createInternalPlayHead();
+		useTime = true;
+	}
+	else 
+	{
+		gridInfo = getMasterClock().updateFromExternalPlayHead(newTime, buffer.getNumSamples());
+	}
+
+	if (useTime)
+	{
+		handleTransportCallbacks(newTime, gridInfo);
 		lastPosInfo = newTime;
 	}
 	else
@@ -869,6 +928,8 @@ void MainController::processBlockCommon(AudioSampleBuffer &buffer, MidiBuffer &m
 	}
 	
 #endif
+
+	
 
 #if ENABLE_CPU_MEASUREMENT
 	startCpuBenchmark(numSamplesThisBlock);
@@ -965,6 +1026,8 @@ void MainController::processBlockCommon(AudioSampleBuffer &buffer, MidiBuffer &m
 		midiMessages.addEvent(m, e->getTimeStamp());
 	}
 
+	processMidiOutBuffer(midiMessages, numSamplesThisBlock);
+
 #else
 
 
@@ -1017,6 +1080,12 @@ void MainController::processBlockCommon(AudioSampleBuffer &buffer, MidiBuffer &m
 			{
 				previewBuffer = AudioSampleBuffer();
 				previewBufferIndex = -1;
+                
+                for(auto pl: previewListeners)
+                {
+                    if(pl != nullptr)
+                        pl->previewStateChanged(false, previewBuffer);
+                }
 			}
 		}
 		
@@ -1024,6 +1093,12 @@ void MainController::processBlockCommon(AudioSampleBuffer &buffer, MidiBuffer &m
 		{
 			previewBuffer = AudioSampleBuffer();
 			previewBufferIndex = -1;
+            
+            for(auto pl: previewListeners)
+            {
+                if(pl != nullptr)
+                    pl->previewStateChanged(false, previewBuffer);
+            }
 		}
 	}
 
@@ -1110,6 +1185,8 @@ void MainController::processBlockCommon(AudioSampleBuffer &buffer, MidiBuffer &m
 
 #if !HISE_MIDIFX_PLUGIN
 	midiMessages.clear();
+
+	processMidiOutBuffer(midiMessages, numSamplesThisBlock);
 #endif
 
 }
@@ -1131,18 +1208,6 @@ void MainController::skin(Component &c)
 		dynamic_cast<Slider*>(&c)->setScrollWheelEnabled(false);
 #endif
 };
-
-
-
-void MainController::setCurrentViewChanged()
-{
-#if USE_BACKEND
-	if(getMainSynthChain() != nullptr)
-	{
-		getMainSynthChain()->setCurrentViewChanged();
-	}
-#endif
-}
 
 
 void MainController::storePlayheadIntoDynamicObject(AudioPlayHead::CurrentPositionInfo &/*newPosition*/)
@@ -1200,7 +1265,7 @@ void MainController::prepareToPlay(double sampleRate_, int samplesPerBlock)
 
 	if (maxBufferSize.get() % HISE_EVENT_RASTER != 0)
 	{
-		sendOverlayMessage(DeactiveOverlay::CustomErrorMessage, "The buffer size " + String(maxBufferSize.get()) + " is not supported. Use a multiple of " + String(HISE_EVENT_RASTER));
+		sendOverlayMessage(State::CustomErrorMessage, "The buffer size " + String(maxBufferSize.get()) + " is not supported. Use a multiple of " + String(HISE_EVENT_RASTER));
 	}
 
     thisAsProcessor = dynamic_cast<AudioProcessor*>(this);
@@ -1254,6 +1319,8 @@ void MainController::prepareToPlay(double sampleRate_, int samplesPerBlock)
 		getConsoleHandler().writeToConsole(s, 0, getMainSynthChain(), Colours::white.withAlpha(0.4f));
 	}
 
+	getMasterClock().setSamplerate(sampleRate);
+
 }
 
 void MainController::setBpm(double newTempo)
@@ -1262,6 +1329,8 @@ void MainController::setBpm(double newTempo)
     
 	if(bpm != newTempo)
 	{
+		getMasterClock().setBpm(newTempo);
+
 		bpm = newTempo;
 
 		for (auto& t : tempoListeners)
@@ -1304,19 +1373,21 @@ bool MainController::isSyncedToHost() const
 #endif
 }
 
-void MainController::handleTransportCallbacks(const AudioPlayHead::CurrentPositionInfo& newInfo)
+void MainController::handleTransportCallbacks(const AudioPlayHead::CurrentPositionInfo& newInfo, const MasterClock::GridInfo& gi)
 {
-	if (lastPosInfo.isPlaying != newInfo.isPlaying)
+	if (lastPosInfo.isPlaying != newInfo.isPlaying || (gi.change && gi.firstGridInPlayback))
 	{
 		for (auto tl : tempoListeners)
-			tl->onTransportChange(newInfo.isPlaying);
+			if(tl != nullptr)
+				tl->onTransportChange(newInfo.isPlaying, newInfo.ppqPosition);
 	}
 
 	if (lastPosInfo.timeSigNumerator != newInfo.timeSigNumerator ||
 		lastPosInfo.timeSigDenominator != newInfo.timeSigDenominator)
 	{
 		for (auto tl : tempoListeners)
-			tl->onSignatureChange(newInfo.timeSigNumerator, newInfo.timeSigDenominator);
+			if(tl != nullptr)
+				tl->onSignatureChange(newInfo.timeSigNumerator, newInfo.timeSigDenominator);
 	}
 
 	if (!pulseListener.isEmpty())
@@ -1340,7 +1411,15 @@ void MainController::handleTransportCallbacks(const AudioPlayHead::CurrentPositi
 			}
 
 			for (auto tl : pulseListener)
-				tl->onBeatChange(beats, isBar);
+				if(tl != nullptr)
+					tl->onBeatChange(beats, isBar);
+		}
+
+		if (gi.change)
+		{
+			for (auto tl : pulseListener)
+				if(tl != nullptr)
+					tl->onGridChange(gi.gridIndex, gi.timestamp, gi.firstGridInPlayback);
 		}
 	}
 }
@@ -1354,7 +1433,7 @@ void MainController::addTempoListener(TempoListener *t)
 	
 	t->tempoChanged(getBpm());
 	t->onSignatureChange(lastPosInfo.timeSigNumerator, lastPosInfo.timeSigDenominator);
-	t->onTransportChange(lastPosInfo.isPlaying);
+	t->onTransportChange(lastPosInfo.isPlaying, lastPosInfo.ppqPosition);
 }
 
 void MainController::removeTempoListener(TempoListener *t)
@@ -1737,94 +1816,146 @@ void MainController::SampleManager::handleNonRealtimeState()
 	}
 }
 
-bool MainController::UserPresetHandler::isReadOnly(const File& f)
+
+
+
+hise::MainController::UserPresetHandler::CustomAutomationData::Ptr MainController::UserPresetHandler::getCustomAutomationData(int index) const
 {
-#if READ_ONLY_FACTORY_PRESETS
-	return factoryPaths->contains(mc, f);
-#else
-	return false;
-#endif
-}
-
-#if READ_ONLY_FACTORY_PRESETS
-bool MainController::UserPresetHandler::FactoryPaths::contains(MainController* mc, const File& f)
-{
-	if (!initialised)
-		initialise(mc);
-
-	auto path = getPath(mc, f);
-
-	if (path.isNotEmpty())
+	if (auto p = customAutomationData[index])
 	{
-		auto ok = factoryPaths.contains(path);
-		return ok;
-	}
-		
-
-	return false;
-}
-
-void MainController::UserPresetHandler::FactoryPaths::initialise(MainController* mc)
-{
-#if USE_FRONTEND
-	ScopedPointer<MemoryInputStream> mis = FrontendFactory::getEmbeddedData(FileHandlerBase::UserPresets);
-	zstd::ZCompressor<UserPresetDictionaryProvider> decompressor;
-	MemoryBlock mb(mis->getData(), mis->getDataSize());
-	ValueTree presetTree;
-	decompressor.expand(mb, presetTree);
-
-	for (auto c : presetTree)
-		addRecursive(c, "{PROJECT_FOLDER}");
-#endif
-
-	initialised = true;
-
-}
-
-String MainController::UserPresetHandler::FactoryPaths::getPath(MainController* mc, const File& f)
-{
-	auto factoryFolder = mc->getCurrentFileHandler().getSubDirectory(FileHandlerBase::UserPresets);
-
-	if (f.isAChildOf(factoryFolder))
-		return "{PROJECT_FOLDER}" + f.withFileExtension("").getRelativePathFrom(factoryFolder).replace("\\", "/");
-
-	for (int i = 0; i < mc->getExpansionHandler().getNumExpansions(); i++)
-	{
-		auto e = mc->getExpansionHandler().getExpansion(i);
-		auto expFolder = e->getSubDirectory(FileHandlerBase::UserPresets);
-
-		if (f.isAChildOf(expFolder))
-			return e->getWildcard() + f.withFileExtension("").getRelativePathFrom(expFolder).replace("\\", "/");
+		jassert(p->index == index);
+		return p;
 	}
 
-	return {};
+	return nullptr;
 }
 
-void MainController::UserPresetHandler::FactoryPaths::addRecursive(const ValueTree& v, const String& path)
+void removePropertyRecursive(NamedValueSet& removedProperties, String currentPath, ValueTree v, const Identifier& id)
 {
-	if (v["isDirectory"])
+	if (!currentPath.isEmpty())
+		currentPath << ":";
+
+	currentPath << v.getType();
+
+	if (v.hasProperty(id))
 	{
-		String thisPath;
-		
-		thisPath << path << v["FileName"].toString();
+		auto value = v.getProperty(id);
+		v.removeProperty(id, nullptr);
+		removedProperties.set(Identifier(currentPath + ":" + id.toString()), value);
+	}
+	
+	for (auto c : v)
+		removePropertyRecursive(removedProperties, currentPath, c, id);
+}
+
+MainController::UserPresetHandler::StoredModuleData::StoredModuleData(var moduleId, Processor* pToRestore) :
+	p(pToRestore)
+{
+	if (moduleId.isString())
+		id = moduleId.toString();
+	else
+	{
+		id = moduleId["ID"].toString();
+
+		auto rp = moduleId["RemovedProperties"];
+		auto rc = moduleId["RemovedChildElements"];
+
+		if (rp.isArray() || rc.isArray())
+		{
+			auto v = p->exportAsValueTree();
+
+			if (rp.isArray())
+			{
+				for (auto propertyToRemove : *rp.getArray())
+				{
+					auto pid_ = propertyToRemove.toString();
+					if (pid_.isNotEmpty())
+					{
+						Identifier pid(pid_);
+						removePropertyRecursive(removedProperties, {}, v, pid);
+					}
+				}
+			}
+			
+			if (rc.isArray())
+			{
+				for (auto childToRemove : *rc.getArray())
+				{
+					auto pid_ = childToRemove.toString();
+
+					if (pid_.isNotEmpty())
+					{
+						Identifier pid(pid_);
+						removedChildElements.add(v.getChildWithName(pid).createCopy());
+					}
+				}
+			}
+
+			removedProperties.remove(Identifier("Processor:ID"));
+		}
+	}
+}
+
+void restorePropertiesRecursive(ValueTree v, StringArray path, const var& value, bool restore)
+{
+	if (path.size() == 2)
+	{
+		if (Identifier(path[0]) == v.getType())
+		{
+			auto id = Identifier(path[1]);
+
+			if (restore)
+				v.setProperty(id, value, nullptr);
+			else
+				v.removeProperty(id, nullptr);
+		}
+	}
+	else
+	{
+		path.remove(0);
 
 		for (auto c : v)
-		{
-			addRecursive(c, thisPath + "/");
-		}
-
-		this->factoryPaths.addIfNotAlreadyThere(thisPath);
-	}
-	if (v.getType() == Identifier("PresetFile"))
-	{
-		String thisFile;
-		
-		thisFile << path << v["FileName"].toString();
-
-		this->factoryPaths.addIfNotAlreadyThere(thisFile);
-		return;
+			restorePropertiesRecursive(c, path, value, restore);
 	}
 }
-#endif
+
+void MainController::UserPresetHandler::StoredModuleData::stripValueTree(ValueTree& v)
+{
+	for (const auto& rp : removedProperties)
+	{
+		auto path = StringArray::fromTokens(rp.name.toString(), ":", "\"");
+		
+		restorePropertiesRecursive(v, path, {}, false);
+	}
+		
+
+	for (const auto& rc : removedChildElements)
+	{
+		auto cToRemove = v.getChildWithName(rc.getType());
+
+		if (cToRemove.isValid())
+			v.removeChild(cToRemove, nullptr);
+	}
+}
+
+
+
+void MainController::UserPresetHandler::StoredModuleData::restoreValueTree(ValueTree& v)
+{
+	stripValueTree(v);
+
+	for (const auto& rp : removedProperties)
+	{
+		auto path = StringArray::fromTokens(rp.name.toString(), ":", "\"");
+		auto value = rp.value;
+		restorePropertiesRecursive(v, path, value, true);
+	}
+		
+
+	for (const auto& rc : removedChildElements)
+		v.addChild(rc.createCopy(), -1, nullptr);
+}
+
+
 
 } // namespace hise

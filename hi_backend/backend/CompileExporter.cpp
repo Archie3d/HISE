@@ -146,6 +146,7 @@ ValueTree BaseExporter::collectAllSampleMapsInDirectory()
 
 bool CompileExporter::globalCommandLineExport = false;
 bool CompileExporter::useCIMode = false;
+int CompileExporter::forcedVSTVersion = 0;
 
 void CompileExporter::printErrorMessage(const String& title, const String &message)
 {
@@ -311,6 +312,10 @@ CompileExporter::ErrorCodes CompileExporter::compileFromCommandLine(const String
 
 		BuildOption b = exporter.getBuildOptionFromCommandLine(args);
 
+		
+
+
+
 		pluginFile = HelperClasses::getFileNameForCompiledPlugin(exporter.dataObject, mainSynthChain, b);
 
 		exporter.setRawExportMode(exportType == "export_raw");
@@ -355,7 +360,27 @@ int CompileExporter::getBuildOptionPart(const String& argument)
 	{
 	case 'p':
 	{
-		const String pluginName = argument.fromFirstOccurrenceOf("-p:", false, true);
+		const String pluginName = argument.fromFirstOccurrenceOf("-p:", false, true).toUpperCase();
+
+		if (pluginName == "VST23AU")
+		{
+			CompileExporter::forcedVSTVersion = 23; // you now, 2 + 3...
+			return 0x0010;
+		}
+
+		if (pluginName == "VST2")
+		{
+			CompileExporter::forcedVSTVersion = 2;
+			return 0x0010;
+		}
+			
+		else if (pluginName == "VST3")
+		{
+			CompileExporter::forcedVSTVersion = 3;
+			return 0x0010;
+		}
+		else
+			CompileExporter::forcedVSTVersion = 0;
 
 		if (pluginName == "VST") return 0x0010;
 		else if (pluginName == "AU") return 0x0020;
@@ -376,12 +401,18 @@ int CompileExporter::getBuildOptionPart(const String& argument)
     }
 	case 'a':
 	{
+		// Always return 64bit, 32bit is dead.
+		return 0x0002;
+#if 0
 		const String architectureName = argument.fromFirstOccurrenceOf("-a:", false, true);
+
+
 
 		if (architectureName == "x86") return 0x0001;
 		else if (architectureName == "x64") return 0x0002;
 		else if (architectureName == "x86x64") return 0x0004;
 		else return 0;
+#endif
 	}
 	case 't':
 	{
@@ -1467,7 +1498,8 @@ hise::CompileExporter::ErrorCodes CompileExporter::createPluginProjucerFile(Targ
 	if (type == TargetTypes::EffectPlugin)
 	{
 		REPLACE_WILDCARD_WITH_STRING("%PLUGINISSYNTH%", "0");
-
+        REPLACE_WILDCARD_WITH_STRING("%PLUGIN_PRODUCES_MIDI_OUT%", "0");
+        
 		auto midiInputEnabled = GET_SETTING(HiseSettings::Project::EnableMidiInputFX);
 		auto soundGeneratorsEnabled = GET_SETTING(HiseSettings::Project::EnableSoundGeneratorsFX);
 
@@ -1486,7 +1518,12 @@ hise::CompileExporter::ErrorCodes CompileExporter::createPluginProjucerFile(Targ
 	else if (type == TargetTypes::MidiEffectPlugin)
 	{
 		REPLACE_WILDCARD_WITH_STRING("%PLUGINWANTSMIDIIN%", "1");
+        REPLACE_WILDCARD_WITH_STRING("%PLUGIN_PRODUCES_MIDI_OUT%", "1");
+        
 		REPLACE_WILDCARD_WITH_STRING("%PLUGINISSYNTH%", "0");
+        
+        
+        
 		REPLACE_WILDCARD_WITH_STRING("%PLUGINISMIDIFX%", "1");
 		REPLACE_WILDCARD_WITH_STRING("%PROCESS_SOUND_GENERATORS_IN_FX_PLUGIN%", "disabled");
 		REPLACE_WILDCARD_WITH_STRING("%FRONTEND_IS_PLUGIN%", "disabled");
@@ -1497,7 +1534,11 @@ hise::CompileExporter::ErrorCodes CompileExporter::createPluginProjucerFile(Targ
 	{
 		REPLACE_WILDCARD_WITH_STRING("%SUPPORT_MONO%", "disabled");
 		REPLACE_WILDCARD_WITH_STRING("%PLUGINISMIDIFX%", "0");
-		REPLACE_WILDCARD_WITH_STRING("%PLUGINISSYNTH%", "1");
+        
+        auto midiOutputEnabled = GET_SETTING(HiseSettings::Project::EnableMidiOut);
+        
+        REPLACE_WILDCARD_WITH_STRING("%PLUGIN_PRODUCES_MIDI_OUT%", midiOutputEnabled);
+        REPLACE_WILDCARD_WITH_STRING("%PLUGINISSYNTH%", "1");
 		REPLACE_WILDCARD_WITH_STRING("%PLUGINWANTSMIDIIN", "1");
 		REPLACE_WILDCARD_WITH_STRING("%ENABLE_MIDI_INPUT_FX%", "disabled");
 		REPLACE_WILDCARD_WITH_STRING("%PROCESS_SOUND_GENERATORS_IN_FX_PLUGIN%", "disabled");
@@ -1566,13 +1607,30 @@ hise::CompileExporter::ErrorCodes CompileExporter::createPluginProjucerFile(Targ
 	{
 		REPLACE_WILDCARD_WITH_STRING("%BUILD_AUV3%", "0");
 
-		const bool buildAU = BuildOptionHelpers::isAU(option);
-		const bool buildVST = BuildOptionHelpers::isVST(option) || BuildOptionHelpers::isHeadlessLinuxPlugin(option);
+		bool buildAU = BuildOptionHelpers::isAU(option);
+		bool buildVST = BuildOptionHelpers::isVST(option);
+		const bool headlessLinux = BuildOptionHelpers::isHeadlessLinuxPlugin(option);
+
+		buildVST |= headlessLinux;
 
 		auto vst3 = GET_SETTING(HiseSettings::Project::VST3Support) == "1";
 
-		const bool buildVST2 = buildVST && !vst3;
-		const bool buildVST3 = buildVST && vst3;
+		bool buildVST2 = buildVST && !vst3;
+		bool buildVST3 = buildVST && vst3;
+
+		if (forcedVSTVersion != 0)
+		{
+			// Only possible in command line export...
+			jassert(isExportingFromCommandLine());
+			jassert(isUsingCIMode());
+			jassert(BuildOptionHelpers::isVST(option));
+			buildVST2 = forcedVSTVersion == 2 || forcedVSTVersion == 23;
+			buildVST3 = forcedVSTVersion == 3 || forcedVSTVersion == 23;
+
+#if JUCE_MAC
+			buildAU = forcedVSTVersion == 23;
+#endif
+		}
 
 #if JUCE_LINUX
 		const bool buildAAX = false;
@@ -1620,6 +1678,9 @@ hise::CompileExporter::ErrorCodes CompileExporter::createPluginProjucerFile(Targ
 			aaxIdentifier << "." << GET_SETTING(HiseSettings::Project::Name).removeCharacters(" -_.,;");
 
 			REPLACE_WILDCARD_WITH_STRING("%AAX_IDENTIFIER%", aaxIdentifier);
+            
+            // Only build 64bit Intel binaries for AAX
+            REPLACE_WILDCARD_WITH_STRING("%ARM_ARCH%", "x86_64");
 		}
 		else
 		{
@@ -1627,6 +1688,7 @@ hise::CompileExporter::ErrorCodes CompileExporter::createPluginProjucerFile(Targ
 			REPLACE_WILDCARD_WITH_STRING("%AAX_RELEASE_LIB%", String());
 			REPLACE_WILDCARD_WITH_STRING("%AAX_DEBUG_LIB%", String());
 			REPLACE_WILDCARD_WITH_STRING("%AAX_IDENTIFIER%", String());
+            REPLACE_WILDCARD_WITH_STRING("%ARM_ARCH%", "arm64,arm64e,x86_64");
 		}
 	}
 
@@ -1721,6 +1783,7 @@ void CompileExporter::ProjectTemplateHelpers::handleCompilerInfo(CompileExporter
 	
     REPLACE_WILDCARD_WITH_STRING("%USE_IPP%", exporter->useIpp ? "1" : "0");
     REPLACE_WILDCARD_WITH_STRING("%IPP_WIN_SETTING%", exporter->useIpp ? "Sequential" : String());
+		REPLACE_WILDCARD_WITH_STRING("%UAC_LEVEL%", exporter->dataObject.getSetting(HiseSettings::Project::AdminPermissions) ? "/MANIFESTUAC:level='requireAdministrator'" : String());
     
     REPLACE_WILDCARD_WITH_STRING("%LEGACY_CPU_SUPPORT%", exporter->legacyCpuSupport ? "1" : "0");
     
@@ -2006,7 +2069,14 @@ String CompileExporter::ProjectTemplateHelpers::getTargetFamilyString(BuildOptio
 
 juce::String CompileExporter::ProjectTemplateHelpers::getPluginChannelAmount(ModulatorSynthChain* chain)
 {
-	return "HISE_NUM_PLUGIN_CHANNELS=" + String(chain->getMatrix().getNumSourceChannels());
+    auto& dataObject = dynamic_cast<BackendProcessor*>(chain->getMainController())->getSettingsObject();
+    
+    int numChannels = chain->getMatrix().getNumSourceChannels();
+    
+    if(IS_SETTING_TRUE(HiseSettings::Project::ForceStereoOutput))
+        numChannels = 2;
+    
+	return "HISE_NUM_PLUGIN_CHANNELS=" + String(numChannels);
 }
 
 CompileExporter::ErrorCodes CompileExporter::copyHISEImageFiles()
@@ -2357,18 +2427,18 @@ void CompileExporter::BatchFileCreator::createBatchFile(CompileExporter* exporte
     }
     else
     {
+        // Allow the errorcode to flow through xcpretty
+        ADD_LINE("set -o pipefail");
+        
         ADD_LINE("echo Compiling " << projectType << " " << projectName << " ...");
 
+		int threads = SystemStats::getNumCpus() - 2;
 		String xcodeLine;
-		xcodeLine << "xcodebuild -project \"Builds/MacOSX/" << projectName << ".xcodeproj\" -configuration \"" << exporter->configurationName << "\"";
-
-		if (!isUsingCIMode())
-		{
-			xcodeLine << " | xcpretty";
-		}
-
+        
+		xcodeLine << "xcodebuild -project \"Builds/MacOSX/" << projectName << ".xcodeproj\" -configuration \"" << exporter->configurationName << "\" -jobs \"" << threads << "\"";
+		xcodeLine << " | xcpretty";
+		
         ADD_LINE(xcodeLine);
-        ADD_LINE("echo Compiling finished. Cleaning up...");
     }
     
     File tempFile = batchFile.getSiblingFile("tempBatch");
@@ -2598,6 +2668,7 @@ void CompileExporter::HeaderHelpers::addProjectInfoLines(CompileExporter* export
 {
 	const String companyName = exporter->GET_SETTING(HiseSettings::User::Company);
 	const String companyWebsiteName = exporter->GET_SETTING(HiseSettings::User::CompanyURL);
+	const String companyCopyright = exporter->GET_SETTING(HiseSettings::User::CompanyCopyright);
 	const String projectName = exporter->GET_SETTING(HiseSettings::Project::Name);
 	const String versionString = exporter->GET_SETTING(HiseSettings::Project::Version);
 	const String appGroupString = exporter->GET_SETTING(HiseSettings::Project::AppGroupID);
@@ -2607,6 +2678,7 @@ void CompileExporter::HeaderHelpers::addProjectInfoLines(CompileExporter* export
 	pluginDataHeaderFile << "String hise::FrontendHandler::getProjectName() { return \"" << projectName << "\"; };\n";
 	pluginDataHeaderFile << "String hise::FrontendHandler::getCompanyName() { return \"" << companyName << "\"; };\n";
 	pluginDataHeaderFile << "String hise::FrontendHandler::getCompanyWebsiteName() { return \"" << companyWebsiteName << "\"; };\n";
+	pluginDataHeaderFile << "String hise::FrontendHandler::getCompanyCopyright() { return \"" << companyCopyright << "\"; };\n";
 	pluginDataHeaderFile << "String hise::FrontendHandler::getVersionString() { return \"" << versionString << "\"; };\n";
     
     pluginDataHeaderFile << "String hise::FrontendHandler::getAppGroupId() { return \"" << appGroupString << "\"; };\n";

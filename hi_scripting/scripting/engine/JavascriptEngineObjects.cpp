@@ -20,12 +20,99 @@ struct HiseJavascriptEngine::RootObject::ObjectClass : public DynamicObject
 //==============================================================================
 struct HiseJavascriptEngine::RootObject::ArrayClass : public DynamicObject
 {
+	typedef var(*ScopedNativeFunction)(Args, const Scope&);
+
+	// This is annoying, but in order to get the scope we have to hack this stuff here...
+	static ScopedNativeFunction getScopedFunction(const Identifier& id)
+	{
+		static const Array<Identifier> scopedFunctions =
+		{
+			"find",
+			"some",
+			"map",
+			"filter"
+		};
+
+		static constexpr int NumFunctionPointers = 4;
+
+		static const ScopedNativeFunction scopedFunctionPointers[NumFunctionPointers] =
+		{
+			ArrayClass::find,
+			ArrayClass::some,
+			ArrayClass::map,
+			ArrayClass::filter
+		};
+
+		auto idx = scopedFunctions.indexOf(id);
+
+		if (isPositiveAndBelow(idx, NumFunctionPointers))
+		{
+			return scopedFunctionPointers[idx];
+		}
+		
+		return nullptr;
+	}
+
+private:
+
+	static bool isFunctionObject(const var& f)
+	{
+		if (dynamic_cast<HiseJavascriptEngine::RootObject::FunctionObject*>(f.getObject()))
+			return true;
+
+		if (dynamic_cast<HiseJavascriptEngine::RootObject::InlineFunction::Object*>(f.getObject()))
+			return true;
+
+		if (f.isMethod())
+			return true;
+
+		return false;
+	}
+
+	static int getNumArgs(const var& f)
+	{
+		if (auto fo = dynamic_cast<HiseJavascriptEngine::RootObject::FunctionObject*>(f.getObject()))
+		{
+			return fo->parameters.size();
+		}
+		if (auto ilf = dynamic_cast<HiseJavascriptEngine::RootObject::InlineFunction::Object*>(f.getObject()))
+		{
+			return ilf->parameterNames.size();
+		}
+
+		return 0;
+	}
+
+	static var callScopedFunction(const var& f, const var::NativeFunctionArgs& args, const HiseJavascriptEngine::RootObject::Scope* parent, DynamicObject::Ptr scopeObject)
+	{
+		jassert(parent != nullptr);
+
+		if (f.isMethod())
+			return f.getNativeFunction()(args);
+
+		if (auto fo = dynamic_cast<HiseJavascriptEngine::RootObject::FunctionObject*>(f.getObject()))
+		{
+			HiseJavascriptEngine::RootObject::Scope s(parent, parent != nullptr ? parent->root.get() : nullptr, scopeObject.get());
+			return fo->invokeWithoutAllocation(s, args, scopeObject.get());
+		}
+		if (auto ilf = dynamic_cast<HiseJavascriptEngine::RootObject::InlineFunction::Object*>(f.getObject()))
+		{
+			HiseJavascriptEngine::RootObject::Scope s(parent, parent != nullptr ? parent->root.get() : nullptr, scopeObject.get());
+			return ilf->performDynamically(s, args.arguments, args.numArguments);
+		}
+
+		return var();
+	}
+
+public:
 	ArrayClass()
 	{
 		setMethod("contains", contains);
 		setMethod("remove", remove);
+        setMethod("removeElement", removeElement);
 		setMethod("join", join);
 		setMethod("push", push);
+		setMethod("pop", pop);
         setMethod("sort", sort);
         setMethod("sortNatural", sortNatural);
 		setMethod("insert", insert);
@@ -35,6 +122,7 @@ struct HiseJavascriptEngine::RootObject::ArrayClass : public DynamicObject
 		setMethod("reverse", reverse);
         setMethod("reserve", reserve);
 		setMethod("clear", clear);
+		
 	}
 
 	static Identifier getClassName()   { static const Identifier i("Array"); return i; }
@@ -47,6 +135,14 @@ struct HiseJavascriptEngine::RootObject::ArrayClass : public DynamicObject
 		return false;
 	}
 
+    static var removeElement(Args a)
+    {
+        if (Array<var>* array = a.thisObject.getArray())
+            array->removeRange((int)get(a, 0), 1);
+
+        return var();
+    }
+    
 	static var remove(Args a)
 	{
 		if (Array<var>* array = a.thisObject.getArray())
@@ -92,6 +188,18 @@ struct HiseJavascriptEngine::RootObject::ArrayClass : public DynamicObject
 
 		return var();
 	}
+
+	static var pop(Args a)
+	{
+		if (Array<var>* array = a.thisObject.getArray())
+		{
+			auto v = array->getLast();
+			array->removeLast();
+			return v;
+		}
+
+		return var();
+	}
     
 	static var reverse(Args a)
 	{
@@ -132,6 +240,182 @@ struct HiseJavascriptEngine::RootObject::ArrayClass : public DynamicObject
         return var();
     }
     
+	static var map(Args a, const Scope& parent)
+	{
+		if (Array<var>* array = a.thisObject.getArray())
+		{
+			auto f = get(a, 0);
+
+			if (isFunctionObject(f))
+			{
+				int numArgs = getNumArgs(f);
+
+				Array<var> newArray;
+				auto thisObject = get(a, 1);
+				newArray.ensureStorageAllocated(array->size());
+
+				DynamicObject::Ptr scopeObject = new DynamicObject();
+
+				int index = 0;
+
+				for (const auto& element : *array)
+				{
+					if (element.isUndefined() || element.isVoid())
+						continue;
+
+					var arg[3];
+					arg[0] = element;
+					arg[1] = index++;
+					arg[2] = a.thisObject;
+
+					var::NativeFunctionArgs args(thisObject, arg, numArgs);
+					
+					auto mappedElement = callScopedFunction(f, args, &parent, scopeObject);
+					newArray.add(mappedElement);
+				}
+
+				return var(newArray);
+			}
+			else
+			{
+				throw String("not a function");
+			}
+		}
+
+		return var();
+	}
+
+	static var filter(Args a, const Scope& parent)
+	{
+		if (Array<var>* array = a.thisObject.getArray())
+		{
+			auto f = get(a, 0);
+
+			if (isFunctionObject(f))
+			{
+				int numArgs = getNumArgs(f);
+
+				Array<var> newArray;
+				auto thisObject = get(a, 1);
+				newArray.ensureStorageAllocated(array->size());
+
+				DynamicObject::Ptr scopeObject = new DynamicObject();
+
+				int index = 0;
+
+				for (const auto& element : *array)
+				{
+					if (element.isUndefined() || element.isVoid())
+						continue;
+
+					var arg[3];
+					arg[0] = element;
+					arg[1] = index++;
+					arg[2] = a.thisObject;
+
+					var::NativeFunctionArgs args(thisObject, arg, numArgs);
+
+					if (callScopedFunction(f, args, &parent, scopeObject))
+						newArray.add(element);
+				}
+
+				return var(newArray);
+			}
+			else
+			{
+				throw String("not a function");
+			}
+		}
+
+		return var();
+	}
+
+	static var some(Args a, const Scope& parent)
+	{
+		if (Array<var>* array = a.thisObject.getArray())
+		{
+			auto f = get(a, 0);
+
+			if (isFunctionObject(f))
+			{
+				int numArgs = getNumArgs(f);
+
+				auto thisObject = get(a, 1);
+
+				DynamicObject::Ptr scopeObject = new DynamicObject();
+
+				int index = 0;
+
+				for (const auto& element : *array)
+				{
+					if (element.isUndefined() || element.isVoid())
+						continue;
+
+					var arg[3];
+					arg[0] = element;
+					arg[1] = index++;
+					arg[2] = a.thisObject;
+
+					var::NativeFunctionArgs args(thisObject, arg, numArgs);
+
+					if (callScopedFunction(f, args, &parent, scopeObject))
+						return true;
+				}
+
+				return var(false);
+			}
+			else
+			{
+				throw String("not a function");
+			}
+		}
+
+		return var();
+	}
+
+	static var find(Args a, const Scope& parent)
+	{
+		if (Array<var>* array = a.thisObject.getArray())
+		{
+			auto f = get(a, 0);
+
+			if (isFunctionObject(f))
+			{
+				int numArgs = getNumArgs(f);
+
+				auto thisObject = get(a, 1);
+
+				DynamicObject::Ptr scopeObject = new DynamicObject();
+
+				int index = 0;
+
+				for (const auto& element : *array)
+				{
+					if (element.isUndefined() || element.isVoid())
+						continue;
+
+					var arg[3];
+					arg[0] = element;
+					arg[1] = index++;
+					arg[2] = a.thisObject;
+
+					var::NativeFunctionArgs args(thisObject, arg, numArgs);
+
+					if (callScopedFunction(f, args, &parent, scopeObject))
+						return element;
+				}
+
+				return var();
+			}
+			else
+			{
+				throw String("not a function");
+			}
+		}
+
+		return var();
+	}
+
 
     static var reserve(Args a)
     {
@@ -211,6 +495,9 @@ struct HiseJavascriptEngine::RootObject::ArrayClass : public DynamicObject
     {
         return get(a, 0).isArray();
     }
+
+
+
     
 };
 
@@ -237,6 +524,9 @@ public:
 	/** Reserves the space needed for the given amount of elements. */
 	void reserve(int numElements) {}
 
+    /** Removes the element at the given position. */
+    var removeElement(int index) { return {}; }
+    
 	/** Joins the array into a string with the given separator. */
 	String join(var separatorString) { return String(); }
 
@@ -263,6 +553,21 @@ public:
 
 	/** Checks if the given variable is an array. */
 	bool isArray(var variableToTest) { return false; }
+
+	/** Returns the value of the first element that passes the function test. */
+	var find(var testFunction, var optionalThisObject) { return var(); }
+
+	/** Creates a new array from calling a function for every array element. */
+	var map(var testFunction, var optionalThisObject) { return var(); }
+
+	/* Checks if any array elements pass a function test. */
+	var some(var testFunction, var optionalThisObject) { return var(); }
+
+	/* Creates a new array filled with elements that pass the function test. */
+	var filter(var testFunction, var optionalThisObject) { return var(); }
+
+	/** Removes and returns the last element. */
+	var pop() { return var(); }
 };
 
 #if JUCE_MSVC
@@ -281,30 +586,34 @@ struct HiseJavascriptEngine::RootObject::StringClass : public DynamicObject
 		setMethod("charAt", charAt);
 		setMethod("charCodeAt", charCodeAt);
 		setMethod("fromCharCode", fromCharCode);
-        setMethod("replace", replace);
+		setMethod("replace", replace);
 		setMethod("split", split);
+		setMethod("splitCamelCase", splitCamelCase);
 		setMethod("lastIndexOf", lastIndexOf);
 		setMethod("toLowerCase", toLowerCase);
 		setMethod("toUpperCase", toUpperCase);
+		setMethod("capitalize", capitalize);
 		setMethod("parseAsJSON", parseAsJSON);
 		setMethod("trim", trim);
 		setMethod("concat", concat);
+		setMethod("encrypt", encrypt);
+		setMethod("decrypt", decrypt);
+		setMethod("contains", contains);
 	}
 
 	static Identifier getClassName()  { static const Identifier i("String"); return i; }
 
-	
+	static var contains(Args a)		 { return a.thisObject.toString().contains(getString(a, 0)); }
 	static var fromCharCode(Args a)  { return String::charToString(getInt(a, 0)); }
 	static var substring(Args a)     { return a.thisObject.toString().substring(getInt(a, 0), getInt(a, 1)); }
 	static var indexOf(Args a)       { return a.thisObject.toString().indexOf(getString(a, 0)); }
 	static var lastIndexOf(Args a)		 { return a.thisObject.toString().lastIndexOf(getString(a, 0)); }
 	static var charCodeAt(Args a)    { return (int)a.thisObject.toString()[getInt(a, 0)]; }
-    static var replace(Args a)       { return a.thisObject.toString().replace(getString(a, 0), getString(a, 1)); }
+	static var replace(Args a)       { return a.thisObject.toString().replace(getString(a, 0), getString(a, 1)); }
 	static var charAt(Args a)        { int p = getInt(a, 0); return a.thisObject.toString().substring(p, p + 1); }
 	static var parseAsJSON(Args a)   { return JSON::parse(a.thisObject.toString()); }	
 	static var toUpperCase(Args a) { return a.thisObject.toString().toUpperCase(); };
 	static var toLowerCase(Args a) { return a.thisObject.toString().toLowerCase(); };
-
 	static var trim(Args a) { return a.thisObject.toString().trim(); };
 
 	static var concat(Args a)
@@ -336,6 +645,115 @@ struct HiseJavascriptEngine::RootObject::StringClass : public DynamicObject
 			array.append(strings[i]);
 
 		return array;
+	}
+	
+	static var splitCamelCase(Args a)
+	{
+		auto trimmed = a.thisObject.toString().removeCharacters(" \t\n\r");
+		auto current = trimmed.begin();
+		auto end = trimmed.end();
+		
+		Array<var> list;
+
+		String currentToken;
+
+		auto flush = [&]()
+		{
+			if (currentToken.isNotEmpty())
+			{
+				list.add(currentToken);
+				currentToken = {};
+			}
+		};
+
+		while (current != end)
+		{
+			if (CharacterFunctions::isDigit(*current))
+			{
+				flush();
+
+				while (CharacterFunctions::isDigit(*current))
+					currentToken << *current++;
+
+				continue;
+			}
+			
+			if (CharacterFunctions::isUpperCase(*current))
+			{
+				flush();
+
+				while (CharacterFunctions::isUpperCase(*current))
+					currentToken << *current++;
+				
+				continue;
+			}
+			
+
+			currentToken << *current++;
+		}
+
+		flush();
+
+		return var(list);
+	}
+
+	static var capitalize(Args a)
+	{
+		const String str(a.thisObject.toString());
+
+		StringArray strings;
+		strings.addTokens(str, " ", "");
+
+		StringArray result;
+		String firstLetter;
+		
+		for (int i = 0; i < strings.size(); i++)
+		{
+			firstLetter = strings[i].substring(0, 1);
+			firstLetter = firstLetter.toUpperCase();
+			result.add(firstLetter + strings[i].substring(1));
+		}
+
+		return var(result.joinIntoString(" ", 0, -1));
+	}
+
+	static var encrypt(Args a)
+	{
+		const String str(a.thisObject.toString());
+		const String key(getString(a, 0));
+
+		auto data = key.getCharPointer().getAddress();
+		auto size = jlimit(0, 72, key.length());
+
+		BlowFish bf(data, size);
+
+		MemoryOutputStream mos;
+		mos.writeString(str);
+		mos.flush();
+		
+		auto out = mos.getMemoryBlock();
+
+		bf.encrypt(out);
+
+		return out.toBase64Encoding();
+	}
+
+	static var decrypt(Args a)
+	{
+		const String encStr(a.thisObject.toString());
+		const String key(getString(a, 0));
+
+		auto data = key.getCharPointer().getAddress();
+		auto size = jlimit(0, 72, key.length());
+
+		BlowFish bf(data, size);
+
+		MemoryBlock in;
+		
+		in.fromBase64Encoding(encStr);
+		bf.decrypt(in);
+
+		return in.toString();
 	}
 };
 
@@ -375,14 +793,29 @@ public:
 	/** Converts a string to lowercase letters. */
 	String toLowerCase() { return String(); }
 
+	/** Checks if the string contains the given substring. */
+	bool contains(String otherString) { return false; }
+
 	/** Converts a string to uppercase letters. */
 	String toUpperCase() { return String(); }
+	
+	/** Converts a string to start case (first letter of every word is uppercase). */
+	String capitalize() { return String(); }
+
+	/** Splits the string at uppercase characters (so MyValue becomes ["My", "Value"]. */
+	Array splitCamelCase();
 
 	/** Returns a copy of this string with any whitespace characters removed from the start and end. */
 	String trim() { return String(); }
 
 	/** Joins two or more strings, and returns a new joined strings. */
 	String concat(var stringlist) { return String(); }
+
+	/** Encrypt a string using Blowfish encryption. */
+	String encrypt(var key) { return String(); }
+
+	/** Decrypt a string from Blowfish encryption. */
+	String decrypt(var key) { return String(); }
 };
 
 #if JUCE_MSVC
@@ -403,8 +836,23 @@ struct HiseJavascriptEngine::RootObject::JSONClass : public DynamicObject
 //==============================================================================
 struct HiseJavascriptEngine::RootObject::IntegerClass : public DynamicObject
 {
-	IntegerClass()                     { setMethod("parseInt", parseInt); }
+	IntegerClass() 
+	{
+		setMethod("parseInt", parseInt); 
+		setMethod("parseFloat", parseFloat);
+	}
 	static Identifier getClassName()   { static const Identifier i("Integer"); return i; }
+
+	static var parseFloat(Args a)
+	{
+		var v = get(a, 0);
+
+		if (v.isDouble() || v.isInt() || v.isInt64()) { return var((double)v); }
+
+		const String s(getString(a, 0).trim());
+
+		return var(s.getDoubleValue());
+	}
 
 	static var parseInt(Args a)
 	{

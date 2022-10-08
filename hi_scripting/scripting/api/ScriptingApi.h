@@ -162,6 +162,9 @@ public:
 		/** Sets a callback that will be performed when an all notes off message is received. */
 		void setAllNotesOffCallback(var onAllNotesOffCallback);
 
+		/** This will forward the message to the MIDI out of the plugin. */
+		void sendToMidiOut();
+
 		// ============================================================================================================
 
 		void setHiseEvent(HiseEvent &m);
@@ -286,6 +289,9 @@ public:
 		/** Shows a message with a question and executes the function after the user has selected his choice. */
 		void showYesNoWindow(String title, String markdownMessage, var callback);
 
+		/** Decodes an Base64 encrypted valuetree (eg. HiseSnippets). */
+		String decodeBase64ValueTree(const String& b64Data);
+
 		/** Creates a (or returns an existing ) script look and feel object. */
 		var createGlobalScriptLookAndFeel();
 
@@ -309,8 +315,14 @@ public:
 		/** Creates (and activates) the expansion handler. */
 		var createExpansionHandler();
 
+		/** Creates a MIDI Automation handler. */
+		var createMidiAutomationHandler();
+
 		/** Creates an user preset handler. */
 		var createUserPresetHandler();
+
+		/** Creates a broadcaster that can send messages to attached listeners. */
+		var createBroadcaster(var defaultValues);
 
 		/** Creates a reference to the DSP network of another script processor. */
 		var getDspNetworkReference(String processorId, String id);
@@ -327,6 +339,12 @@ public:
 		/** Creates a reference to the script license manager. */
 		var createLicenseUnlocker();
 
+		/** Renders a MIDI event list as audio data on a background thread and calls a function when it's ready. */
+		void renderAudio(var eventList, var finishCallback);
+
+		/** Previews a audio buffer with a callback indicating the state. */
+		void playBuffer(var bufferData, var callback);
+
 		/** Sends an allNotesOff message at the next buffer. */
 		void allNotesOff();
 
@@ -341,6 +359,12 @@ public:
 
 		/** Extends the compilation timeout. Use this if you have a long task that would get cancelled otherwise. This is doing nothing in compiled plugins. */
 		void extendTimeOut(int additionalMilliseconds);
+
+		/** Sets the global pitch factor (in semitones). */
+		void setGlobalPitchFactor(double pitchFactorInSemitones);
+
+		/** Returns the global pitch factor (in semitones). */
+		double getGlobalPitchFactor() const;
 
 		/** Changes the lowest visible key on the on screen keyboard. */
 		void setLowestKeyToDisplay(int keyNumber);
@@ -446,6 +470,9 @@ public:
 
 		/** Returns the current operating system ("OSX", "LINUX", or ("WIN"). */
 		String getOS();
+		
+		/** Returns info about the current hardware and OS configuration. */
+		var getSystemStats();
 				
 		/** Returns the mobile device that this software is running on. */
 		String getDeviceType();
@@ -455,6 +482,12 @@ public:
 
 		/** Returns true if running as VST / AU / AAX plugin. */
 		bool isPlugin() const;
+
+		/** Returns true if the project is running inside HISE. You can use this during development to simulate different environments. */
+		bool isHISE();
+
+		/** Forces a full (asynchronous) reload of all samples (eg. after the sample directory has changed). */
+		void reloadAllSamples();
 
 		/** Returns the preload progress from 0.0 to 1.0. Use this to display some kind of loading icon. */
 		double getPreloadProgress();
@@ -479,6 +512,9 @@ public:
 
     /** Returns the product name (not the HISE name!). */
     String getName();
+
+		/** Returns project and company info from the Project's preferences. */
+		var getProjectInfo();
 
 		/** Returns the current peak volume (0...1) for the given channel. */
 		double getMasterPeakLevel(int channel);
@@ -531,11 +567,22 @@ public:
 		/** Matches the string against the regex token. */
 		bool matchesRegex(String stringToMatch, String regex);
 
-    /** Returns an array with all matches. */
-    var getRegexMatches(String stringToMatch, String regex);
+		/** Creates an error handler that reacts on initialisation errors. */
+		var createErrorHandler();
 
-    /** Returns a string of the value with the supplied number of digits. */
-    String doubleToString(double value, int digits);
+		/** Returns an array with all matches. */
+		var getRegexMatches(String stringToMatch, String regex);
+
+		/** Returns a string of the value with the supplied number of digits. */
+		String doubleToString(double value, int digits);
+		
+		/** Returns the width of the string for the given font properties. */
+		float getStringWidth(String text, String fontName, float fontSize, float fontSpacing);
+
+		String intToHexString(int value);
+
+		/** Signals that the application should terminate. */
+		void quit();
 
 		/** Reverts the last controller change. */
 		void undo();
@@ -557,6 +604,12 @@ public:
 		double unused = 0.0;
 
 		ScriptBaseMidiProcessor* parentMidiProcessor;
+
+		ScopedPointer<Thread> currentExportThread;
+
+		struct PreviewHandler;
+
+		ScopedPointer<PreviewHandler> previewHandler;
 
 		JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(Engine);
 	};
@@ -657,9 +710,20 @@ public:
 		/** Returns an array of the form [width, height]. */
 		var getUserDesktopSize();
 
+		/** Returns whether OpenGL is enabled or not. The return value might be out of sync with the actual state (after you changed this setting until the next reload). */
+		bool isOpenGLEnabled() const;
+
+		/** Enable OpenGL. This setting will be applied the next time the interface is rebuild. */
+		void setEnableOpenGL(bool shouldBeEnabled);
+		
+		/** Enables or disables debug logging */
+		void setEnableDebugMode(bool shouldBeEnabled);
+
 		// ============================================================================================================
 
 	private:
+
+		
 
 		GlobalSettingManager* gm;
 		AudioProcessorDriver* driver;
@@ -678,7 +742,9 @@ public:
 		Sampler(ProcessorWithScriptingContent *p, ModulatorSampler *sampler);
 		~Sampler() {};
 
-		Identifier getObjectName() const override { return "Sampler"; }
+		static Identifier getClassName() { RETURN_STATIC_IDENTIFIER("Sampler"); }
+
+		Identifier getObjectName() const override { return getClassName(); }
 		bool objectDeleted() const override { return sampler.get() == nullptr; }
 		bool objectExists() const override { return sampler.get() != nullptr; }
 
@@ -914,6 +980,9 @@ public:
 		/** Returns the attribute of the parent synth. */
 		float getAttribute(int attributeIndex) const;
 
+		/** Creates a Builder object that can be used to create the module tree. */
+		var createBuilder();
+
 		/** Adds a note on to the buffer. */
 		int addNoteOn(int channel, int noteNumber, int velocity, int timeStampSamples);
 
@@ -1080,7 +1149,6 @@ public:
 
 		friend class ModuleHandler;
 
-		
 		WeakReference<Message> messageObject;
 
 		ModulatorSynth * const owner;
@@ -1205,6 +1273,8 @@ public:
 	{
 	public:
 
+		
+
 		TransportHandler(ProcessorWithScriptingContent* sp);;
 		~TransportHandler();
 
@@ -1213,9 +1283,10 @@ public:
 
 		struct Callback: public PooledUIUpdater::Broadcaster
 		{
-			Callback(TransportHandler* p, const var& f, bool sync, int numArgs);
+			Callback(TransportHandler* p, const String& name, const var& f, bool sync, int numArgs);
 
-			void call(var arg1, var arg2 = {}, bool forceSynchronous=false);
+			void call(var arg1, var arg2 = {}, var arg3 = {}, bool forceSynchronous = false);
+
 
 			void callAsync();
 
@@ -1226,7 +1297,7 @@ public:
 			void callSync();
 
 			const int numArgs;
-			var args[2];
+			var args[3];
 
 			JavascriptProcessor* jp;
 			WeakReference<TransportHandler> th;
@@ -1248,6 +1319,21 @@ public:
 		/** Registers a callback to changes in the musical position (bars / beats). */
 		void setOnBeatChange(bool sync, var f);
 
+		/** Registers a callback to changes in the grid. */
+		void setOnGridChange(bool sync, var f);
+
+		/** Enables a high precision grid timer. */
+		void setEnableGrid(bool shouldBeEnabled, int tempoFactor);
+
+		/** Starts the internal master clock. */
+		void startInternalClock(int timestamp);
+
+		/** Stops the internal master clock. */
+		void stopInternalClock(int timestamp);
+
+		/** Sets the sync mode for the global clock. */
+		void setSyncMode(int syncMode);
+
 	private:
 
 		void clearIf(ScopedPointer<Callback>& cb, const var& f)
@@ -1262,6 +1348,9 @@ public:
 		int denom = 4;
 		int beat = 0;
 		bool newBar = true;
+		int gridIndex = 0;
+		int gridTimestamp = 0;
+		bool firstGridInPlayback = false;
 
 		struct Wrapper;
 
@@ -1269,57 +1358,24 @@ public:
 		ScopedPointer<Callback> transportChangeCallback;
 		ScopedPointer<Callback> timeSignatureCallback;
 		ScopedPointer<Callback> beatCallback;
+		ScopedPointer<Callback> gridCallback;
 
 		ScopedPointer<Callback> tempoChangeCallbackAsync;
 		ScopedPointer<Callback> transportChangeCallbackAsync;
 		ScopedPointer<Callback> timeSignatureCallbackAsync;
 		ScopedPointer<Callback> beatCallbackAsync;
+		ScopedPointer<Callback> gridCallbackAsync;
+		
 
-		void tempoChanged(double newTempo) override
-		{
-			bpm = newTempo;
+		void tempoChanged(double newTempo) override;
 
-			if (tempoChangeCallback != nullptr)
-				tempoChangeCallback->call(newTempo);
+		void onTransportChange(bool isPlaying, double ppqPosition) override;
 
-			if (tempoChangeCallbackAsync != nullptr)
-				tempoChangeCallbackAsync->call(newTempo);
-		}
+		void onBeatChange(int newBeat, bool isNewBar) override;
 
-		void onTransportChange(bool isPlaying) override
-		{
-			play = isPlaying;
+		void onSignatureChange(int newNominator, int numDenominator) override;
 
-			if (transportChangeCallback != nullptr)
-				transportChangeCallback->call(isPlaying);
-
-			if (transportChangeCallbackAsync != nullptr)
-				transportChangeCallbackAsync->call(isPlaying);
-		}
-
-		void onBeatChange(int newBeat, bool isNewBar) override
-		{
-			beat = newBeat;
-			newBar = isNewBar;
-
-			if (beatCallback != nullptr)
-				beatCallback->call(newBeat, newBar);
-
-			if (beatCallbackAsync != nullptr)
-				beatCallbackAsync->call(newBeat, newBar);
-		}
-
-		void onSignatureChange(int newNominator, int numDenominator) override
-		{
-			nom = newNominator;
-			denom = numDenominator;
-
-			if (timeSignatureCallback != nullptr)
-				timeSignatureCallback->call(newNominator, numDenominator);
-
-			if (timeSignatureCallbackAsync != nullptr)
-				timeSignatureCallbackAsync->call(newNominator, numDenominator);
-		}
+		void onGridChange(int gridIndex_, uint16 timestamp, bool firstGridInPlayback_) override;
 
 		void handlePooledMessage(PooledUIUpdater::Broadcaster* b) override
 		{
@@ -1442,6 +1498,8 @@ public:
 			Documents,
 			Desktop,
 			Downloads,
+			Applications,
+			Temp,
 			numSpecialLocations
 		};
 
@@ -1474,11 +1532,17 @@ public:
 		String getSystemId();
 		
 		/**  Convert a file size in bytes to a neat string description. */
-		String descriptionOfSizeInBytes(int bytes);
+		String descriptionOfSizeInBytes(int64 bytes);
 
 		/** Returns the number of free bytes on the volume of a given folder. */
 		int64 getBytesFreeOnVolume(var folder);
 
+        /** Encrypts the given string using a RSA private key. */
+        String encryptWithRSA(const String& dataToEncrypt, const String& privateKey);
+        
+        /** Decrypts the given string using a RSA public key. */
+        String decryptWithRSA(const String& dataToDecrypt, const String& publicKey);
+        
 		// ========================================================= End of API calls
 
 		ProcessorWithScriptingContent* p;
@@ -1533,6 +1597,9 @@ public:
 
 		/** Converts a colour from a [r, g, b, a] float array to a uint32 value. */
 		int fromVec4(var vec4);
+
+		/** Linear interpolation between two colours. */
+		int mix(int colour1, int colour2, float alpha);
 
 		// ============================================================================================================
 

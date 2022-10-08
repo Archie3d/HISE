@@ -90,6 +90,7 @@ void Modulation::setIntensityFromSlider(float sliderValue) noexcept
 	case PitchMode:	setIntensity(PitchConverters::octaveRangeToSignedNormalisedRange(sliderValue)); break;
 	case PanMode:	setIntensity(sliderValue / 100.0f); break;
 	case GlobalMode: setIntensity(sliderValue); break;
+    default: jassertfalse; break;
 	}
 }
 
@@ -711,9 +712,7 @@ void Modulation::PitchConverters::normalisedRangeToPitchFactor(float* rangeValue
 #endif
 
 		if (hasDeltaSignChange)
-		{
-			DBG("USE RANGE");
-			
+		{			
 			for (int i = 0; i < numValues; i++)
 				rangeValues[i] = normalisedRangeToPitchFactor(rangeValues[i]);
 		}

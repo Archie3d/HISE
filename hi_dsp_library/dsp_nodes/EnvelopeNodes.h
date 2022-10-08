@@ -64,10 +64,9 @@ template <typename ParameterType> struct envelope_base: public control::pimpl::p
 
 		if (thisActive)
 		{
-			auto mv = t.getModValue();
-
-			if(mv != lastValue)
-				this->getParameter().template call<0>(mv);
+			float mv = (float)t.getModValue();
+			FloatSanitizers::sanitizeFloatNumber(mv);
+			this->getParameter().template call<0>((double)mv);
 		}
 
 		if (thisActive != wasActive)
@@ -162,6 +161,20 @@ private:
 struct ahdsr_base: public mothernode,
 				   public data::display_buffer_base<true>
 {
+	enum Parameters
+	{
+		Attack,
+		AttackLevel,
+		Hold,
+		Decay,
+		Sustain,
+		Release,
+		AttackCurve,
+		Retrigger,
+		Gate,
+		numParameters
+	};
+
 	struct AhdsrRingBufferProperties : public SimpleRingBuffer::PropertyObject
 	{
 		static constexpr int PropertyIndex = 2002;
@@ -176,6 +189,8 @@ struct ahdsr_base: public mothernode,
 		RingBufferComponentBase* createComponent() { return new AhdsrGraph(); }
 
 		bool validateInt(const Identifier& id, int& v) const override;
+
+		Path createPath(Range<int> sampleRange, Range<float> valueRange, Rectangle<float> targetBounds, double) const override;
 
 		void transformReadBuffer(AudioSampleBuffer& b) override
 		{
@@ -248,7 +263,7 @@ struct ahdsr_base: public mothernode,
 
 		/// the uptime
 		int holdCounter;
-		float current_value;
+		float current_value = 0.0f;
 
 		int leftOverSamplesFromLastBuffer = 0;
 
@@ -257,17 +272,17 @@ struct ahdsr_base: public mothernode,
 
 		float attackTime;
 
-		float attackLevel;
-		float attackCoef;
-		float attackBase;
+		float attackLevel = 0.5f;
+		float attackCoef = 0.0f;
+		float attackBase = 1.0f;
 
 		float decayTime;
-		float decayCoef;
-		float decayBase;
+		float decayCoef = 0.0f;
+		float decayBase = 1.0f;
 
 		float releaseTime;
-		float releaseCoef;
-		float releaseBase;
+		float releaseCoef = 0.0f;
+		float releaseBase = 1.0f;
 		float release_delta;
 
 		float lastSustainValue;
@@ -286,8 +301,10 @@ struct ahdsr_base: public mothernode,
 	void setDisplayValue(int index, float value, bool convertDbValues=true)
 	{
 		if (convertDbValues && (index == 1 || index == 4))
-			value = Decibels::gainToDecibels(value);
-
+		{
+			value = Decibels::gainToDecibels(jlimit(0.0f, 1.0f, value));
+		}
+			
 		if(rb != nullptr)
 			rb->getUpdater().sendContentChangeMessage(sendNotificationAsync, index);
 
@@ -470,11 +487,11 @@ template <int NV, typename ParameterType> struct simple_ar: public pimpl::envelo
 		DEF_PARAMETER(Gate, simple_ar);
 		DEF_PARAMETER(AttackCurve, simple_ar);
 	}
-	PARAMETER_MEMBER_FUNCTION;
+	SN_PARAMETER_MEMBER_FUNCTION;
 
 	static constexpr bool isPolyphonic() { return NumVoices > 1; }
 
-	SET_HISE_NODE_ID("simple_ar");
+	SN_NODE_ID("simple_ar");
 	SN_GET_SELF_AS_OBJECT(simple_ar);
 	SN_DESCRIPTION("A simple attack / release envelope");
 
@@ -644,19 +661,7 @@ template <int NV, typename ParameterType> struct simple_ar: public pimpl::envelo
 template <int NV, typename ParameterType> struct ahdsr : public pimpl::envelope_base<ParameterType>,
 														 public pimpl::ahdsr_base
 {
-	enum Parameters
-	{
-		Attack,
-		AttackLevel,
-		Hold,
-		Decay,
-		Sustain,
-		Release,
-		AttackCurve,
-		Retrigger,
-		Gate,
-		numParameters
-	};
+	
 
 	ahdsr():
 		pimpl::envelope_base<ParameterType>(getStaticId())
@@ -675,7 +680,7 @@ template <int NV, typename ParameterType> struct ahdsr : public pimpl::envelope_
 
 	static constexpr int NumVoices = NV;
 
-	SET_HISE_POLY_NODE_ID("ahdsr");
+	SN_POLY_NODE_ID("ahdsr");
 	SN_GET_SELF_AS_OBJECT(ahdsr);
 	SN_DESCRIPTION("The AHDSR envelope from HISE");
 
@@ -699,7 +704,8 @@ template <int NV, typename ParameterType> struct ahdsr : public pimpl::envelope_
 		for (state_base& s : states)
 			s.current_state = pimpl::ahdsr_base::state_base::IDLE;
 
-		this->sendGateOffAtReset();
+		if constexpr (!isPolyphonic())
+			this->sendGateOffAtReset();
 	}
 
 	void handleHiseEvent(HiseEvent& e)
@@ -805,7 +811,9 @@ template <int NV, typename ParameterType> struct ahdsr : public pimpl::envelope_
 
 		jassert(std::isfinite(value));
 
-		setDisplayValue(P, v);
+		FloatSanitizers::sanitizeFloatNumber(v);
+
+		setDisplayValue(P, v, true);
 
 		if (P == Parameters::AttackCurve)
 		{
@@ -871,73 +879,68 @@ template <int NV, typename ParameterType> struct ahdsr : public pimpl::envelope_
 		}
 	}
 
-	FORWARD_PARAMETER_TO_MEMBER(ahdsr);
+	SN_FORWARD_PARAMETER_TO_MEMBER(ahdsr);
 
 	void createParameters(ParameterDataList& data)
 	{
 		InvertableParameterRange timeRange(0.0, 10000.0, 0.1);
 		timeRange.setSkewForCentre(300.0);
 
-		
-
 		{
-			parameter::data p("Attack", timeRange);
-			p.callback = parameter::inner<ahdsr, Parameters::Attack>(*this);
+			DEFINE_PARAMETERDATA(ahdsr, Attack);
+			p.setRange(timeRange);
 			p.setDefaultValue(10.0);
 			data.add(p);
 		}
 		
 		{
-			parameter::data p("AttackLevel", { 0.0, 1.0, 0.001 });
-			p.callback = parameter::inner<ahdsr, Parameters::AttackLevel>(*this);
+			DEFINE_PARAMETERDATA(ahdsr, AttackLevel);
 			p.setDefaultValue(1.0);
 			data.add(p);
 		}
 
 		{
-			parameter::data p("Decay", timeRange);
-			p.callback = parameter::inner<ahdsr, Parameters::Decay>(*this);
+			DEFINE_PARAMETERDATA(ahdsr, Hold);
+			p.setRange(timeRange);
+			p.setDefaultValue(20.0);
+			data.add(p);
+		}
+
+		{
+			DEFINE_PARAMETERDATA(ahdsr, Decay);
+			p.setRange(timeRange);
 			p.setDefaultValue(300.0);
 			data.add(p);
 		}
 
 		{
-			parameter::data p("Hold", timeRange);
-			p.callback = parameter::inner<ahdsr, Parameters::Hold>(*this);
-			p.setDefaultValue(20.0);
-			data.add(p);
-		}
-
-		{
-			parameter::data p("Sustain", { 0.0, 1.0, 0.001 });
-			p.callback = parameter::inner<ahdsr, Parameters::Sustain>(*this);
+			DEFINE_PARAMETERDATA(ahdsr, Sustain);
 			p.setDefaultValue(0.5);
 			data.add(p);
 		}
 
 		{
-			parameter::data p("Release", timeRange);
-			p.callback = parameter::inner<ahdsr, Parameters::Release>(*this);
+			DEFINE_PARAMETERDATA(ahdsr, Release);
+			p.setRange(timeRange);
 			p.setDefaultValue(20.0);
 			data.add(p);
 		}
 
 		{
-			parameter::data p("AttackCurve", { 0.0, 1.0, 0.01 });
-			p.callback = parameter::inner<ahdsr, Parameters::AttackCurve>(*this);
+			DEFINE_PARAMETERDATA(ahdsr, AttackCurve);
 			p.setDefaultValue(0.5);
 			data.add(p);
 		}
 
 		{
-			parameter::data p("Retrigger", { 0.0, 1.0, 1.0 });
-			p.callback = parameter::inner<ahdsr, Parameters::Retrigger>(*this);
+			DEFINE_PARAMETERDATA(ahdsr, Retrigger);
+			p.setRange({ 0.0, 1.0, 1.0 });
 			p.setDefaultValue(0.0);
 			data.add(p);
 		}
 		{
-			parameter::data p("Gate", { 0.0, 1.0, 1.0 });
-			p.callback = parameter::inner<ahdsr, Parameters::Gate>(*this);
+			DEFINE_PARAMETERDATA(ahdsr, Gate);
+			p.setRange({ 0.0, 1.0, 1.0 });
 			p.setDefaultValue(0.0);
 			data.add(p);
 		}
@@ -953,38 +956,48 @@ template <int NV, typename ParameterType> struct ahdsr : public pimpl::envelope_
 struct voice_manager_base : public mothernode
 {
 	struct editor : public Component,
-		public PooledUIUpdater::SimpleTimer
+		public PooledUIUpdater::SimpleTimer,
+		public hise::PathFactory
 	{
-		editor(PooledUIUpdater* updater, VoiceResetter* n) :
+		editor(PooledUIUpdater* updater, PolyHandler* ph_) :
 			SimpleTimer(updater),
-			vr(n)
+			ph(ph_),
+			panicButton("panic", nullptr, *this)
 		{
-			setSize(100, 32 + 10);
+			addAndMakeVisible(panicButton);
+
+			panicButton.setTooltip("Send a reset message for all active voices");
+			panicButton.onClick = [this]()
+			{
+				if (auto vr = getVoiceResetter())
+					vr->onVoiceReset(true, -1);
+			};
+
+			setSize(256, 32 + 10);
 		};
 
 		void timerCallback() override
 		{
-			auto thisVoice = vr != nullptr ? vr->getNumActiveVoices() : 0;
+			auto isOk = getVoiceResetter() != nullptr;
 
-			if (lastVoiceAmount != thisVoice)
+			auto thisVoice = isOk ? getVoiceResetter()->getNumActiveVoices() : 0;
+
+			if (lastVoiceAmount != thisVoice || isOk != ok)
 			{
+				ok = isOk;
 				lastVoiceAmount = thisVoice;
 				repaint();
 			}
 		}
+
+		Path createPath(const String& id) const override;
 
 		static Component* createExtraComponent(void* obj, PooledUIUpdater* updater)
 		{
 			auto t = static_cast<mothernode*>(obj);
 			auto t2 = dynamic_cast<voice_manager_base*>(t);
 
-			return new editor(updater, t2->p->getVoiceResetter());
-		}
-
-		void mouseUp(const MouseEvent& e) override
-		{
-			if (vr != nullptr)
-				vr->onVoiceReset(true, -1);
+			return new editor(updater, t2->p);
 		}
 
 		void paint(Graphics& g) override
@@ -1008,17 +1021,42 @@ struct voice_manager_base : public mothernode
 			g.setColour(Colours::white.withAlpha(alpha));
 			g.setFont(GLOBAL_BOLD_FONT());
 
-			String s;
-			s << String(lastVoiceAmount) << " active voice";
 
-			if (lastVoiceAmount != 1)
-				s << "s";
+			String s;
+
+			if(ok)
+			{
+				s << String(lastVoiceAmount) << " active voice";
+
+				if (lastVoiceAmount != 1)
+					s << "s";
+			}
+			else
+			{
+				s << "    Add a ScriptnodeVoiceKillerEnvelope.";
+			}
 
 			g.drawText(s, b, Justification::centred);
 		}
 
+		VoiceResetter* getVoiceResetter()
+		{
+			return ph != nullptr ? ph->getVoiceResetter() : nullptr;
+		}
+
+		void resized() override
+		{
+			auto b = getLocalBounds();
+			b.removeFromBottom(10);
+			panicButton.setBounds(b.removeFromLeft(32).reduced(4));
+		}
+
 		int lastVoiceAmount = 0;
-		WeakReference<VoiceResetter> vr;
+		
+		PolyHandler* ph;
+		bool ok = false;
+
+		HiseShapeButton panicButton;
 	};
 
 	virtual ~voice_manager_base() {};
@@ -1041,20 +1079,20 @@ template <int NV> struct silent_killer_impl: public voice_manager_base
 
 	static constexpr int NumVoices = NV;
 
-	SET_HISE_POLY_NODE_ID("silent_killer");
+	SN_POLY_NODE_ID("silent_killer");
 	SN_GET_SELF_AS_OBJECT(silent_killer_impl);
 	SN_DESCRIPTION("Send a voice reset message as soon when silence is detected");
 
-	HISE_EMPTY_INITIALISE;
-	HISE_EMPTY_MOD;
-	HISE_EMPTY_RESET;
+	SN_EMPTY_INITIALISE;
+	SN_EMPTY_MOD;
+	SN_EMPTY_RESET;
 	
 	DEFINE_PARAMETERS
 	{
 		DEF_PARAMETER(Threshold, silent_killer_impl);
 		DEF_PARAMETER(Active, silent_killer_impl);
 	}
-	PARAMETER_MEMBER_FUNCTION;
+	SN_PARAMETER_MEMBER_FUNCTION;
 
 	void prepare(PrepareSpecs ps) override
 	{
@@ -1135,18 +1173,18 @@ using silent_killer_poly = silent_killer_impl<NUM_POLYPHONIC_VOICES>;
 
 struct voice_manager: public voice_manager_base
 {
-	SET_HISE_NODE_ID("voice_manager");
+	SN_NODE_ID("voice_manager");
 	SN_GET_SELF_AS_OBJECT(voice_manager);
 	SN_DESCRIPTION("Sends a voice reset message when `Value > 0.5`");
 
 	static constexpr bool isPolyphonic() { return false; }
 
-	HISE_EMPTY_HANDLE_EVENT;
-	HISE_EMPTY_MOD;
-	HISE_EMPTY_RESET;
-	HISE_EMPTY_PROCESS;
-	HISE_EMPTY_PROCESS_SINGLE;
-	HISE_EMPTY_INITIALISE;
+	SN_EMPTY_HANDLE_EVENT;
+	SN_EMPTY_MOD;
+	SN_EMPTY_RESET;
+	SN_EMPTY_PROCESS;
+	SN_EMPTY_PROCESS_FRAME;
+	SN_EMPTY_INITIALISE;
 
 	template <int P> void setParameter(double v)
 	{
@@ -1159,7 +1197,7 @@ struct voice_manager: public voice_manager_base
 			p->sendVoiceResetMessage(true);
 	}
 
-	FORWARD_PARAMETER_TO_MEMBER(voice_manager);
+	SN_FORWARD_PARAMETER_TO_MEMBER(voice_manager);
 
 	void createParameters(ParameterDataList& data)
 	{

@@ -88,6 +88,7 @@ Array<juce::Identifier> HiseSettings::Project::getAllIds()
 	ids.add(AAXCategoryFX);
 	ids.add(SupportMonoFX);
 	ids.add(EnableMidiInputFX);
+    ids.add(EnableMidiOut);
 	ids.add(EnableSoundGeneratorsFX);
 	ids.add(VST3Support);
 	ids.add(UseRawFrontend);
@@ -95,6 +96,8 @@ Array<juce::Identifier> HiseSettings::Project::getAllIds()
 	ids.add(EncryptionKey);
 	ids.add(LinkExpansionsToProject);
 	ids.add(ReadOnlyFactoryPresets);
+    ids.add(ForceStereoOutput);
+		ids.add(AdminPermissions);
 
 	return ids;
 }
@@ -132,10 +135,12 @@ Array<juce::Identifier> HiseSettings::Scripting::getAllIds()
 	Array<Identifier> ids;
 
 	ids.add(EnableCallstack);
+	ids.add(EnableOptimizations);
 	ids.add(GlobalScriptPath);
 	ids.add(CompileTimeout);
 	ids.add(CodeFontSize);
 	ids.add(EnableDebugMode);
+	ids.add(SaveConnectedFilesOnCompile);
 
 	return ids;
 }
@@ -152,6 +157,7 @@ Array<juce::Identifier> HiseSettings::Other::getAllIds()
 	ids.add(AudioThreadGuardEnabled);
 	ids.add(ExternalEditorPath);
     ids.add(AutoShowWorkspace);
+	ids.add(EnableShaderLineNumbers);
 
 	return ids;
 }
@@ -267,6 +273,7 @@ Array<juce::Identifier> HiseSettings::SnexWorkbench::getAllIds()
 
 		P(HiseSettings::Project::OSXStaticLibs);
 		D("If you need to link a static library on macOS, supply the path to the .a library file here.");
+        D("> This can also be used to set additional linker flags for additional frameworks (eg. iLok).");
 		P_();
 
 		P(HiseSettings::Project::ExtraDefinitionsWindows);
@@ -367,7 +374,11 @@ Array<juce::Identifier> HiseSettings::SnexWorkbench::getAllIds()
 		P(HiseSettings::Project::EnableMidiInputFX);
 		D("If enabled, the effect plugin will process incoming MIDI messages (if the host supports FX plugins with MIDI input");
 		P_();
-
+        
+        P(HiseSettings::Project::EnableMidiOut);
+        D("If enabled, the instrument plugin can send out MIDI messages that you forward using `Message.sendToMidiOut()`");
+        P_();
+        
 		P(HiseSettings::Project::EnableSoundGeneratorsFX);
 		D("If enabled, the effect plugin will also process child sound generators (eg. Global modulation containers and Macro modulation sources");
 		D("> Be aware that the sound output of the child sound generators will not be used, so this is only useful with \"quiet\" sound generators");
@@ -383,12 +394,22 @@ Array<juce::Identifier> HiseSettings::SnexWorkbench::getAllIds()
 		D("If enabled, the exported plugins will use the VST3 SDK standard instead of the VST 2.x SDK. Until further notice, this is a experimental feature so proceed with caution.");
 		D("> Be aware that Steinberg stopped support for the VST 2.4 SDK in October 2018 so if you don't have a valid VST2 license agreement in place, you must use the VST3 SDK.");
 		P_();
-		
+				
 		P(HiseSettings::Project::UseRawFrontend);
 		D("If enabled, the project will not use the preset structure and scripted user interface and lets you use HISE as C++ framework.");
 		D("You will have to implement a custom C++ class in the `AdditionalSourceCode` subfolder.");
 		P_();
 
+        P(HiseSettings::Project::ForceStereoOutput);
+        D("If you export a plugin with HISE it will create as much channels as the routing matrix of the master container requires.");
+        D(" If you don't want this behaviour, you can enable this option to force the plugin to just use a stereo channel configuration");
+        P_();
+    
+				P(HiseSettings::Project::AdminPermissions);
+				D("If enabled, standalone builds on Windows will prompt the user for administrator privileges.");
+				D(" This is neccessary for tasks that access restricted locations such as the user's VST3 directory.");
+				P_();
+		    
 		P(HiseSettings::User::Company);
 		D("Your company name. This will be used for the path to the app data directory so make sure you don't use weird characters here");
 		P_();
@@ -437,6 +458,11 @@ Array<juce::Identifier> HiseSettings::SnexWorkbench::getAllIds()
 		D("> You can temporarily change the font size for individual elements using Cmd+Scrollwheel, however this will not be persistent.");
 		P_();
 
+		P(HiseSettings::Scripting::EnableOptimizations);
+		D("Enables some compiler optimizations like constant folding or dead code removal for the HiseScript compiler");
+		D("> This setting is baked into a plugin when you compile it");
+		P_();
+
 		P(HiseSettings::Compiler::Support32BitMacOS);
 		D("If enabled (which is still the default), the compiler will build both 32bit and 64bit versions as universal binary on macOS. However since 32bit binaries are deprecated in the most recent versions of macOS / XCode, you can tell the exporter to just generate 64bit binaries by disabling this flag. If you see this error messag in the compile terminal:");
 		D("> error: The i386 architecture is deprecated. You should update your ARCHS build setting to remove the i386 architecture.");
@@ -463,6 +489,10 @@ Array<juce::Identifier> HiseSettings::SnexWorkbench::getAllIds()
 		D(" x++;");
 		D("");
 		D("```\n");
+		P_();
+
+		P(HiseSettings::Scripting::SaveConnectedFilesOnCompile);
+		D("If this is enabled, it will save a connected script file everytime the script is compiled. By default this is disabled, but if you want to apply changes to a connected script file, you will have to enable this setting");
 		P_();
 
 		P(HiseSettings::Scripting::GlobalScriptPath);
@@ -515,6 +545,10 @@ Array<juce::Identifier> HiseSettings::SnexWorkbench::getAllIds()
         
 		P(HiseSettings::Other::AudioThreadGuardEnabled);
 		D("Watches for illegal calls in the audio thread. Use this during script development to catch allocations etc.");
+		P_();
+
+		P(HiseSettings::Other::EnableShaderLineNumbers);
+		D("Enables proper support for line numbers when editing GLSL shader files. This injects a `#line` preprocessor before your code so that the line numbers will be displayed correctly.     \n> Old graphic cards (eg. the integrated Intel HD ones) do not support this, so if you get a weird GLSL compile error, untick this line.");
 		P_();
 
 		P(HiseSettings::Documentation::DocRepository);
@@ -677,23 +711,29 @@ juce::StringArray HiseSettings::Data::getOptionsFor(const Identifier& id)
 		id == Scripting::EnableCallstack ||
 		id == Other::EnableAutosave ||
 		id == Scripting::EnableDebugMode ||
+		id == Scripting::EnableOptimizations ||
 		id == Other::AudioThreadGuardEnabled ||
 		id == Other::UseOpenGL ||
 		id == Other::GlassEffect ||
         id == Other::AutoShowWorkspace ||
+		id == Other::EnableShaderLineNumbers ||
 		id == Compiler::RebuildPoolFiles ||
 		id == Compiler::Support32BitMacOS ||
 		id == Project::SupportMonoFX ||
 		id == Project::EnableMidiInputFX ||
+        id == Project::EnableMidiOut ||
 		id == Project::EnableSoundGeneratorsFX ||
 		id == Project::VST3Support ||
 		id == Project::UseRawFrontend ||
 		id == Project::LinkExpansionsToProject ||
 		id == Project::SupportFullDynamicsHLAC ||
 		id == Project::ReadOnlyFactoryPresets ||
+        id == Project::ForceStereoOutput ||
+				id == Project::AdminPermissions ||
 		id == Documentation::RefreshOnStartup ||
 		id == SnexWorkbench::PlayOnRecompile ||
-		id == SnexWorkbench::AddFade)
+		id == SnexWorkbench::AddFade ||
+		id == Scripting::SaveConnectedFilesOnCompile)
 	    return { "Yes", "No" };
 
 	if (id == Compiler::VisualStudioVersion)
@@ -867,14 +907,17 @@ var HiseSettings::Data::getDefaultSetting(const Identifier& id) const
 	else if (id == Project::AAXCategoryFX)			return "AAX_ePlugInCategory_Modulation";
 	else if (id == Project::SupportMonoFX)			return "No";
 	else if (id == Project::EnableMidiInputFX)		return "No";
+    else if (id == Project::EnableMidiOut)          return "No";
 	else if (id == Project::EnableSoundGeneratorsFX) return "No";
 	else if (id == Project::ReadOnlyFactoryPresets) return "No";
+    else if (id == Project::ForceStereoOutput)      return "No";
+		else if (id == Project::AdminPermissions) return "No";
 	else if (id == Project::VST3Support)			return "No";
 	else if (id == Project::UseRawFrontend)			return "No";
 	else if (id == Project::ExpansionType)			return "Disabled";
 	else if (id == Project::LinkExpansionsToProject)   return "No";
 	else if (id == Other::UseOpenGL)				return "No";
-	else if (id == Other::GlassEffect)				return "Yes";
+	else if (id == Other::GlassEffect)				return "No";
 	else if (id == Other::EnableAutosave)			return "Yes";
 	else if (id == Other::AutosaveInterval)			return 5;
 	else if (id == Other::AudioThreadGuardEnabled)  return "Yes";
@@ -884,7 +927,9 @@ var HiseSettings::Data::getDefaultSetting(const Identifier& id) const
 	else if (id == Documentation::RefreshOnStartup) return "Yes";
 	else if (id == Scripting::CodeFontSize)			return 17.0;
 	else if (id == Scripting::EnableCallstack)		return "No";
+	else if (id == Scripting::EnableOptimizations)	return "No";
 	else if (id == Scripting::CompileTimeout)		return 5.0;
+	else if (id == Scripting::SaveConnectedFilesOnCompile) return "No";
 	else if (id == Compiler::VisualStudioVersion)	return "Visual Studio 2017";
 	else if (id == Compiler::UseIPP)				return "Yes";
 	else if (id == Compiler::LegacyCPUSupport) 		return "No";
@@ -953,8 +998,8 @@ juce::Result HiseSettings::Data::checkInput(const Identifier& id, const var& new
 	if (id == Project::AppGroupID || id == Project::BundleIdentifier)
 	{
 		const String wildcard = (id == HiseSettings::Project::BundleIdentifier) ?
-			R"(com\.[\w\d-_]+\.[\w\d-_]+$)" :
-			R"(group\.[\w\d-_]+\.[\w\d-_]+$)";
+			R"(com\.[\w_]+\.[\w_]+$)" :
+			R"(group\.[\w_]+\.[\w_]+$)";
 
 		if (!RegexFunctions::matchesWildcard(wildcard, newValue.toString()))
 		{
@@ -1030,7 +1075,8 @@ void HiseSettings::Data::settingWasChanged(const Identifier& id, const var& newV
 		mc->getAutoSaver().updateAutosaving();
 	else if (id == Other::AudioThreadGuardEnabled)
 		mc->getKillStateHandler().enableAudioThreadGuard(newValue);
-
+	else if (id == Scripting::EnableOptimizations)
+		mc->compileAllScripts();
 	else if (id == Scripting::EnableDebugMode)
 		newValue ? mc->getDebugLogger().startLogging() : mc->getDebugLogger().stopLogging();
 	else if (id == Audio::Samplerate)

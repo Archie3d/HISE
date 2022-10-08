@@ -228,6 +228,12 @@ void FloatingTileContainer::notifySiblingChange()
 	}
 }
 
+void FloatingTileContainer::moveContent(int oldIndex, int newIndex)
+{
+	auto o = components.removeAndReturn(oldIndex);
+	components.insert(newIndex, o);
+}
+
 FloatingTabComponent::CloseButton::CloseButton() :
 	ShapeButton("Close", Colours::white.withAlpha(0.2f), Colours::white.withAlpha(0.8f), Colours::white)
 {
@@ -330,6 +336,7 @@ FloatingTabComponent::FloatingTabComponent(FloatingTile* parent) :
 	Path p;
 	p.loadPathFromData(HiBinaryData::ProcessorEditorHeaderIcons::addIcon, sizeof(HiBinaryData::ProcessorEditorHeaderIcons::addIcon));
 
+	addButton->setWantsKeyboardFocus(false);
 	addButton->setShape(p, false, false, true);
 
 	setAddButtonCallback({});
@@ -361,6 +368,10 @@ void FloatingTabComponent::popupMenuClickOnTab(int tabIndex, const String& /*tab
 	m.addSeparator();
 	m.addItem(2, "Export Tab as JSON", !getComponent(tabIndex)->isVital());
 	m.addItem(3, "Replace Tab with JSON in clipboard", !getComponent(tabIndex)->isVital());
+	m.addItem(4, "Close all tabs", getNumTabs() != 0);
+	m.addItem(7, "Close other tabs", getNumTabs() > 1);
+	m.addItem(5, "Move to front", getComponent(tabIndex) != nullptr, tabIndex == 0);
+	m.addItem(6, "Sort tabs");
 
 	const int result = m.show();
 
@@ -378,6 +389,55 @@ void FloatingTabComponent::popupMenuClickOnTab(int tabIndex, const String& /*tab
 	else if (result == 3)
 	{
 		getComponent(tabIndex)->loadFromJSON(SystemClipboard::getTextFromClipboard());
+	}
+	else if (result == 4)
+	{
+		while (getNumTabs() > 0)
+		{
+			removeFloatingTile(getComponent(0));
+		}
+	}
+	else if (result == 7)
+	{
+		moveTab(tabIndex, 0, false);
+		moveContent(tabIndex, 0);
+
+		while (getNumTabs() > 1)
+			removeFloatingTile(getComponent(1));
+	}
+	else if (result == 5)
+	{
+		moveTab(tabIndex, 0, true);
+		moveContent(tabIndex, 0);
+	}
+	else if (result == 6)
+	{
+		for (int i = 0; i < getNumTabs(); i++)
+		{
+			int lowestConnectionIndex = INT_MAX;
+			int indexToMove = i;
+
+			for (int j = i; j < getNumTabs(); j++)
+			{
+				if (auto pc = dynamic_cast<PanelWithProcessorConnection*>(getComponent(j)->getCurrentFloatingPanel()))
+				{
+					auto thisIndex = pc->getCurrentIndex();
+
+					if (thisIndex < lowestConnectionIndex)
+					{
+						indexToMove = j;
+						lowestConnectionIndex = thisIndex;
+					}
+				}
+			}
+
+			if (i != indexToMove)
+			{
+				moveTab(indexToMove, i, true);
+				moveContent(indexToMove, i);
+			}
+		}
+
 	}
 }
 
@@ -442,21 +502,23 @@ void FloatingTabComponent::componentRemoved(FloatingTile* deletedComponent)
 
 void FloatingTabComponent::mouseDown(const MouseEvent& event)
 {
-	if (getNumTabs() == 1)
+	if (getNumTabs() <= 1)
 		return;
 
 	int newTabIndex = getCurrentTabIndex();
 
 	if (event.mods.isX2ButtonDown())
 	{
-		newTabIndex = jmin<int>(newTabIndex + 1, getNumTabs() - 1);
+		if (++newTabIndex == getNumTabs())
+			newTabIndex = 0;
 
 		if (newTabIndex != getCurrentTabIndex())
 			setCurrentTabIndex(newTabIndex);
 	}
 	else if (event.mods.isX1ButtonDown())
 	{
-		newTabIndex = jmax<int>(newTabIndex - 1, 0);
+		if (--newTabIndex < 0)
+			newTabIndex = getNumTabs() - 1;
 
 		if (newTabIndex != getCurrentTabIndex())
 			setCurrentTabIndex(newTabIndex);
@@ -468,6 +530,7 @@ var FloatingTabComponent::toDynamicObject() const
 	var obj = FloatingTileContainer::toDynamicObject();
 
 	storePropertyInObject(obj, TabPropertyIds::CurrentTab, getCurrentTabIndex());
+	storePropertyInObject(obj, TabPropertyIds::CycleKeyPress, cycleKeyId.toString());
 
 	return obj;
 }
@@ -476,10 +539,14 @@ void FloatingTabComponent::fromDynamicObject(const var& objectData)
 {
 	clear();
 	clearTabs();
-	
 
 	FloatingTileContainer::fromDynamicObject(objectData);
 
+	auto t = getPropertyWithDefault(objectData, TabPropertyIds::CycleKeyPress).toString();
+    
+    if(t.isNotEmpty())
+        cycleKeyId = Identifier(t);
+    
 	setCurrentTabIndex(getPropertyWithDefault(objectData, TabPropertyIds::CurrentTab));
 }
 
@@ -494,6 +561,7 @@ Identifier FloatingTabComponent::getDefaultablePropertyId(int index) const
 		return FloatingTileContainer::getDefaultablePropertyId(index);
 
 	RETURN_DEFAULT_PROPERTY_ID(index, TabPropertyIds::CurrentTab, "CurrentTab");
+	RETURN_DEFAULT_PROPERTY_ID(index, TabPropertyIds::CycleKeyPress, "CycleKeyPress");
 
 	jassertfalse;
 	return Identifier();
@@ -505,6 +573,7 @@ var FloatingTabComponent::getDefaultProperty(int id) const
 		return FloatingTileContainer::getDefaultProperty(id);
 
 	RETURN_DEFAULT_PROPERTY(id, TabPropertyIds::CurrentTab, -1);
+	RETURN_DEFAULT_PROPERTY(id, TabPropertyIds::CycleKeyPress, "");
 
 	jassertfalse;
 
@@ -577,6 +646,17 @@ void FloatingTabComponent::setAddButtonCallback(const std::function<void()>& f)
 		addButton->onClick = f;
 	else
 		addButton->onClick = BIND_MEMBER_FUNCTION_0(FloatingTabComponent::addButtonClicked);
+}
+
+void FloatingTabComponent::currentTabChanged(int newCurrentTabIndex, const String& newCurrentTabName)
+{
+	TabbedComponent::currentTabChanged(newCurrentTabIndex, newCurrentTabName);
+
+	if (auto fc = getComponent(newCurrentTabIndex))
+	{
+		if (auto fp = fc->getCurrentFloatingPanel())
+			dynamic_cast<Component*>(fp)->grabKeyboardFocusAsync();
+	}
 }
 
 void ResizableFloatingTileContainer::refreshLayout()
@@ -1038,6 +1118,15 @@ void ResizableFloatingTileContainer::InternalResizer::mouseDown(const MouseEvent
 		nextDownSizes.add(nextPanel->getLayoutData().getCurrentSize());
 		totalNextDownSize += nextDownSizes.getLast();
 	}
+
+	auto sum = totalNextDownSize + totalPrevDownSize;
+
+	sum *= -1.0;
+
+	totalNextDownSize /= sum;
+	totalPrevDownSize /= sum;
+
+	sum = totalNextDownSize + totalPrevDownSize;
 }
 
 

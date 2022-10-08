@@ -237,13 +237,13 @@ hise::fixobj::LayoutBase::MemoryLayoutItem::List LayoutBase::createLayout(Alloca
 
 Factory::Factory(ProcessorWithScriptingContent* s, const var& d) :
 	ConstScriptingObject(s, 0),
-	customCompareFunction(getScriptProcessor(), var(), 2)
+	customCompareFunction(getScriptProcessor(), this, var(), 2)
 {
 	allocator = new Allocator();
 
 	ADD_API_METHOD_0(create);
 	ADD_API_METHOD_1(createArray);
-	ADD_API_METHOD_0(createStack);
+	ADD_API_METHOD_1(createStack);
 	ADD_API_METHOD_1(setCompareFunction);
 
 	addConstant("prototype", d);
@@ -282,11 +282,11 @@ var Factory::createArray(int numElements)
 	return {};
 }
 
-var Factory::createStack()
+var Factory::createStack(int numElements)
 {
 	if (initResult.wasOk())
 	{
-		auto newElement = new Stack(getScriptProcessor());
+		auto newElement = new Stack(getScriptProcessor(), numElements);
 		newElement->compareFunction = compareFunction;
 		newElement->init(this);
 		arrays.add(newElement);
@@ -300,7 +300,7 @@ void Factory::setCompareFunction(var newCompareFunction)
 {
 	if (HiseJavascriptEngine::isJavascriptFunction(newCompareFunction))
 	{
-		customCompareFunction = WeakCallbackHolder(getScriptProcessor(), newCompareFunction, 2);
+		customCompareFunction = WeakCallbackHolder(getScriptProcessor(), this, newCompareFunction, 2);
 		customCompareFunction.incRefCount();
 	}
 }
@@ -663,8 +663,6 @@ int Array::indexOf(var obj) const
 {
 	if (auto o = dynamic_cast<ObjectReference*>(obj.getObject()))
 	{
-		int index = 0;
-
 		int numToSearch = size();
 
 		for (int i = 0; i < numToSearch; i++)
@@ -711,8 +709,6 @@ bool Array::copy(String propertyName, var target)
 		if (numElements != b->size)
 			reportScriptError("buffer size mismatch");
 
-		auto numToCopy = size();
-
 		for (int i = 0; i < numElements; i++)
 		{
 			auto v = (float)Helpers::getElement(originalType, ptr);
@@ -741,7 +737,7 @@ bool Array::copy(String propertyName, var target)
 
 int Array::size() const
 {
-	return numElements;
+	return (int)numElements;
 }
 
 bool Array::contains(var obj) const

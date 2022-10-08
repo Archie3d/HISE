@@ -166,7 +166,7 @@ public:
 		return nextIndexToDisplay;
 	}
 
-	void swapData(const var &otherData);
+	void swapData(const var &otherData, NotificationType n);
 
 	void setDisplayedIndex(int index)
 	{
@@ -215,7 +215,7 @@ public:
 
 private:
 
-	void swapBuffer(VariantBuffer::Ptr otherBuffer);
+	void swapBuffer(VariantBuffer::Ptr otherBuffer, NotificationType n);
 
 	struct SliderPackAction : public UndoableAction
 	{
@@ -295,8 +295,9 @@ public:
 		virtual ~LookAndFeelMethods() {};
 
 		virtual void drawSliderPackBackground(Graphics& g, SliderPack& s);
-
 		virtual void drawSliderPackFlashOverlay(Graphics& g, SliderPack& s, int sliderIndex, Rectangle<int> sliderBounds, float intensity);
+		virtual void drawSliderPackRightClickLine(Graphics& g, SliderPack& s, Line<float> lineToDraw);
+		virtual void drawSliderPackTextPopup(Graphics& g, SliderPack& s, const String& textToDraw);
 	};
 
 	struct SliderLookAndFeel : public BiPolarSliderLookAndFeel,
@@ -332,15 +333,7 @@ public:
 		}
 	} 
 
-	void displayedIndexChanged(SliderPackData* d, int newIndex) override
-	{
-		if (currentDisplayIndex != newIndex)
-		{
-			currentDisplayIndex = newIndex;
-			displayAlphas.set(newIndex, 0.4f);
-			startTimer(30);
-		}
-	}
+	void displayedIndexChanged(SliderPackData* d, int newIndex) override;
 
 	void timerCallback() override;
 
@@ -353,6 +346,9 @@ public:
 	/** Sets the value of one of the sliders. If the index is bigger than the slider amount, it will do nothing. */
 	void setValue(int sliderIndex, double newValue);
 
+	int getCurrentlyDraggedSliderIndex() const { return currentlyDraggedSlider; }
+	double getCurrentlyDraggedSliderValue() const { return currentlyDraggedSliderValue; }
+
 	void setSliderPackData(SliderPackData* newData);
 
 	void setComplexDataUIBase(ComplexDataUIBase* newData) override
@@ -360,6 +356,8 @@ public:
 		if (auto sp = dynamic_cast<SliderPackData*>(newData))
 			setSliderPackData(sp);
 	}
+
+	void updateSliderRange();
 
 	void updateSliders();
 
@@ -439,6 +437,11 @@ public:
 			d->removeListener(listener);
 	}
 
+	void setCallbackOnMouseUp(bool shouldFireOnMouseUp)
+	{
+		callbackOnMouseUp = shouldFireOnMouseUp;
+	}
+
 private:
 
 	int lastDragIndex = -1;
@@ -465,6 +468,8 @@ private:
 
 	bool currentlyDragged;
 
+	bool callbackOnMouseUp = false;
+
 	int currentlyDraggedSlider;
 
 	double currentlyDraggedSliderValue;
@@ -472,6 +477,7 @@ private:
 	WeakReference<SliderPackData> data;
 	OwnedArray<Slider> sliders;
 
+	JUCE_DECLARE_WEAK_REFERENCEABLE(SliderPack);
 };
 
 

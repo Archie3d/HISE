@@ -179,6 +179,14 @@ This can be used to simulate an audio effect routing setup (when the appropriate
 #define FORCE_INPUT_CHANNELS 0
 #endif
 
+/** Config: HISE_DEACTIVATE_OVERLAY
+	If enabled, this will deactivate the dark overlay that shows error messages so you
+	can define your own thing.
+*/
+#ifndef HISE_DEACTIVATE_OVERLAY
+#define HISE_DEACTIVATE_OVERLAY 0
+#endif
+
 /** Config: HISE_MIDIFX_PLUGIN
 
 If set to 1, then the plugin will be a MIDI effect plugin.
@@ -243,7 +251,12 @@ Set this to 0 to deactivate the plotter data collection
 #define ENABLE_PLOTTER 1
 #endif
 
+/** Config: HISE_NUM_MACROS
 
+Set this to the number of macros you want in your project. */
+#ifndef HISE_NUM_MACROS
+#define HISE_NUM_MACROS 8
+#endif
 
 /** Config: ENABLE_SCRIPTING_SAFE_CHECKS
 
@@ -275,6 +288,14 @@ If true, then the FX plugin will have a MIDI input and the MIDI processor chain 
 */
 #ifndef HISE_ENABLE_MIDI_INPUT_FOR_FX
 #define HISE_ENABLE_MIDI_INPUT_FOR_FX 0
+#endif
+
+/** Config: HISE_COMPLAIN_ABOUT_ILLEGAL_BUFFER_SIZE
+
+If true then the plugin will complain about the buffer size not being a multiple of HISE_EVENT_RASTER. 
+*/
+#ifndef HISE_COMPLAIN_ABOUT_ILLEGAL_BUFFER_SIZE
+#define HISE_COMPLAIN_ABOUT_ILLEGAL_BUFFER_SIZE 1
 #endif
 
 /** Config: ENABLE_ALL_PEAK_METERS
@@ -317,9 +338,22 @@ Set this to 0 to disable host information like tempo, playing position etc...
 #define ENABLE_HOST_INFO 1
 #endif
 
-
+/** Config: HISE_USE_OPENGL_FOR_PLUGIN
+ 
+ Enables OpenGL support for your project.
+ */
 #ifndef HISE_USE_OPENGL_FOR_PLUGIN
 #define HISE_USE_OPENGL_FOR_PLUGIN 0
+#endif
+
+/** Config: HISE_DEFAULT_OPENGL_VALUE
+ 
+ If HISE_USE_OPENGL_FOR_PLUGIN is enabled, this can be used to specify whether
+OpenGL should be enabled by default or not.
+  
+*/
+#ifndef HISE_DEFAULT_OPENGL_VALUE
+#define HISE_DEFAULT_OPENGL_VALUE 1
 #endif
 
 /** Config: ENABLE_STARTUP_LOGGER

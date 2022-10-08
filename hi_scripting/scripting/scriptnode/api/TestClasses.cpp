@@ -217,6 +217,7 @@ String ScriptNetworkTest::dumpNetworkAsXml()
 	auto copy = v.createCopy();
 
 #if USE_BACKEND
+	DspNetworkListeners::PatchAutosaver::removeDanglingConnections(copy);
 	DspNetworkListeners::PatchAutosaver::stripValueTree(copy);
 #endif
 
@@ -282,6 +283,7 @@ String ScriptNetworkTest::createAsciiDiff(var data1, var data2, int numLines)
 		int l = s1.length();
 		int l2 = s2.length();
 
+        ignoreUnused(l2);
 		jassert(l == l2);
 
 		String newC;
@@ -444,7 +446,7 @@ void ScriptNetworkTest::CHandler::processTest(ProcessDataDyn& data)
 }
 
 ScriptNetworkTest::CHandler::RuntimeFunction::RuntimeFunction(DspNetwork* n, const var& f_, int timestamp_) :
-	f(n->getScriptProcessor(), f_, 0),
+	f(n->getScriptProcessor(), nullptr, f_, 0),
 	timestamp(timestamp_)
 {
 	f.incRefCount();

@@ -81,12 +81,15 @@ DECLARE_ID(AAXCategoryFX);
 DECLARE_ID(SupportMonoFX);
 DECLARE_ID(EnableSoundGeneratorsFX);
 DECLARE_ID(EnableMidiInputFX);
+DECLARE_ID(EnableMidiOut);
 DECLARE_ID(UseRawFrontend);
 DECLARE_ID(VST3Support);
 DECLARE_ID(ExpansionType);
 DECLARE_ID(EncryptionKey);
 DECLARE_ID(LinkExpansionsToProject);
 DECLARE_ID(ReadOnlyFactoryPresets);
+DECLARE_ID(ForceStereoOutput);
+DECLARE_ID(AdminPermissions);
 
 Array<Identifier> getAllIds();
 
@@ -124,7 +127,9 @@ DECLARE_ID(EnableCallstack);
 DECLARE_ID(GlobalScriptPath);
 DECLARE_ID(CompileTimeout);
 DECLARE_ID(CodeFontSize);
+DECLARE_ID(EnableOptimizations);
 DECLARE_ID(EnableDebugMode);
+DECLARE_ID(SaveConnectedFilesOnCompile);
 
 Array<Identifier> getAllIds();
 
@@ -134,6 +139,7 @@ namespace Other
 {
 DECLARE_ID(GlobalSamplePath);
 DECLARE_ID(UseOpenGL);
+DECLARE_ID(EnableShaderLineNumbers);
 DECLARE_ID(GlassEffect);
 DECLARE_ID(EnableAutosave);
 DECLARE_ID(AutosaveInterval);

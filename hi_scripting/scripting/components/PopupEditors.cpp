@@ -116,6 +116,22 @@ PopupIncludeEditor::PopupIncludeEditor(JavascriptProcessor *s, const File &fileT
 
 	addButtonAndCompileLabel();
 	refreshAfterCompilation(JavascriptProcessor::SnippetResult(s->getLastErrorMessage(), 0));
+
+	for (int i = 0; i < jp->getNumWatchedFiles(); i++)
+	{
+		if (jp->getWatchedFile(i) == fileToEdit)
+		{
+			auto storedPos = jp->getLastPosition(jp->getWatchedFileDocument(i));
+
+			if (storedPos.getPosition() != 0)
+			{
+				mcl::Selection sel;
+				sel.head = { storedPos.getLineNumber(), storedPos.getIndexInLine() };
+				sel.tail = sel.head;
+				editor->editor.getTextDocument().setSelection(0, sel, false);
+			}
+		}
+	}
 }
 
 PopupIncludeEditor::PopupIncludeEditor(JavascriptProcessor* s, const Identifier &callback_) :
@@ -206,15 +222,35 @@ void PopupIncludeEditor::addButtonAndCompileLabel()
 	compileButton->setButtonText(TRANS("Compile"));
 	compileButton->setConnectedEdges(Button::ConnectedOnLeft | Button::ConnectedOnRight);
 	compileButton->addListener(this);
-	compileButton->setColour(TextButton::buttonColourId, Colour(0xa2616161));
+	compileButton->setColour(TextButton::buttonColourId, Colours::transparentBlack);
 
 	addAndMakeVisible(resumeButton = new TextButton("new button"));
 	resumeButton->setButtonText(TRANS("Resume"));
 	resumeButton->setConnectedEdges(Button::ConnectedOnLeft | Button::ConnectedOnRight);
 	resumeButton->addListener(this);
-	resumeButton->setColour(TextButton::buttonColourId, Colour(0xa2616161));
+	resumeButton->setColour(TextButton::buttonColourId, Colours::transparentBlack);
 	resumeButton->setVisible(false);
 
+    addAndMakeVisible(errorButton = new HiseShapeButton("error", nullptr, factory));
+    
+    errorButton->setVisible(false);
+    
+    auto offColour = Colour(HISE_ERROR_COLOUR).withMultipliedBrightness(1.6f);
+    
+    errorButton->setColours(offColour.withMultipliedAlpha(0.75f), offColour, offColour);
+    
+    errorButton->setTooltip("Navigate to the code position that causes the compiliation error.");
+    
+    
+    errorButton->onClick = [this]()
+    {
+        resultLabel->gotoText();
+        dynamic_cast<Processor*>(jp.get())->getMainController()->getLastActiveEditor()->grabKeyboardFocusAsync();
+    };
+    
+    compileButton->setLookAndFeel(&blaf);
+    resumeButton->setLookAndFeel(&blaf);
+    
 	setSize(800, 800);
 }
 
@@ -281,6 +317,16 @@ void PopupIncludeEditor::refreshAfterCompilation(const JavascriptProcessor::Snip
 
 PopupIncludeEditor::~PopupIncludeEditor()
 {
+	if (jp != nullptr && editor != nullptr)
+	{
+		auto& doc = editor->editor.getDocument();
+		auto pos = editor->editor.getTextDocument().getSelection(0).head;
+
+        CodeDocument::Position p(doc, pos.x, pos.y);
+        
+		jp->setWatchedFilePosition(p);
+	}
+
 	editor = nullptr;
 	resultLabel = nullptr;
 
@@ -297,10 +343,15 @@ PopupIncludeEditor::~PopupIncludeEditor()
 
 void PopupIncludeEditor::timerCallback()
 {
-	resultLabel->setColour(TextEditor::backgroundColourId, lastCompileOk ? Colours::green.withBrightness(0.1f) : Colours::red.withBrightness((0.1f)));
+    errorButton->setVisible(!lastCompileOk);
+    resultLabel->setOK(lastCompileOk);
 	repaint();
+    resized();
 	stopTimer();
+    
 }
+
+
 
 bool PopupIncludeEditor::keyPressed(const KeyPress& key)
 {
@@ -309,6 +360,26 @@ bool PopupIncludeEditor::keyPressed(const KeyPress& key)
 		compileInternal();
 		return true;
 	}
+
+#if 0
+    if (TopLevelWindowWithKeyMappings::matches(this, key, TextEditorShortcuts::goto_undo))
+    {
+        return dynamic_cast<Processor*>(jp.get())->getMainController()->getLocationUndoManager()->undo();
+        return true;
+    }
+    if (TopLevelWindowWithKeyMappings::matches(this, key, TextEditorShortcuts::goto_redo))
+    {
+        return dynamic_cast<Processor*>(jp.get())->getMainController()->getLocationUndoManager()->redo();
+        return true;
+    }
+#endif
+    
+	if (TopLevelWindowWithKeyMappings::matches(this, key, TextEditorShortcuts::goto_file))
+	{
+		jassertfalse;
+		return true;
+	}
+	
 
 	return false;
 }
@@ -351,16 +422,19 @@ void PopupIncludeEditor::resized()
 	bool isInPanel = findParentComponentOfClass<FloatingTile>() != nullptr;
 
 	if(isInPanel)
-		editor->setBounds(0, 0, getWidth(), getHeight() - 18);
+		editor->setBounds(0, 0, getWidth(), getHeight() - BOTTOM_HEIGHT);
 	else
 		editor->setBounds(0, 5, getWidth(), getHeight() - 23);
 
-	auto b = getLocalBounds().removeFromBottom(18);
+	auto b = getLocalBounds().removeFromBottom(BOTTOM_HEIGHT);
 
-	compileButton->setBounds(b.removeFromRight(95));
+	compileButton->setBounds(b.removeFromRight(75));
 
+    if(errorButton->isVisible())
+        errorButton->setBounds(b.removeFromLeft(35).reduced(2).translated(0, 1));
+    
 	if (resumeButton->isVisible())
-		resumeButton->setBounds(b.removeFromRight(95));
+		resumeButton->setBounds(b.removeFromRight(75));
 
 	resultLabel->setBounds(b);
 }
@@ -429,6 +503,27 @@ void PopupIncludeEditor::paintOverChildren(Graphics& g)
 		g.fillRect(0, 0, 5, 5);
 		
 	}
+}
+
+void PopupIncludeEditor::initKeyPresses(Component* root)
+{
+	String cat = "Code Editor";
+	
+	TopLevelWindowWithKeyMappings::addShortcut(root, cat, TextEditorShortcuts::add_autocomplete_template, "Add Autocomplete Template", 
+		KeyPress(KeyPress::F8Key));
+
+	TopLevelWindowWithKeyMappings::addShortcut(root, cat, TextEditorShortcuts::clear_autocomplete_templates, "Clear Autocomplete Templates", 
+		KeyPress(KeyPress::F8Key, ModifierKeys::commandModifier, 0));
+
+	TopLevelWindowWithKeyMappings::addShortcut(root, cat, TextEditorShortcuts::show_search_replace, "Search & Replace", KeyPress('g', ModifierKeys::commandModifier, 'g'));
+
+	TopLevelWindowWithKeyMappings::addShortcut(root, cat, TextEditorShortcuts::breakpoint_resume, "Resume breakpoint", KeyPress(KeyPress::F10Key));
+
+	TopLevelWindowWithKeyMappings::addShortcut(root, cat, TextEditorShortcuts::goto_file, "Goto file", KeyPress('t', ModifierKeys::commandModifier | ModifierKeys::shiftModifier, 't'));
+    
+    TopLevelWindowWithKeyMappings::addShortcut(root, cat, TextEditorShortcuts::goto_undo, "Undo Goto", KeyPress(KeyPress::backspaceKey, ModifierKeys::commandModifier, 0));
+    
+    TopLevelWindowWithKeyMappings::addShortcut(root, cat, TextEditorShortcuts::goto_redo, "Redo Goto", KeyPress(KeyPress::backspaceKey, ModifierKeys::commandModifier | ModifierKeys::shiftModifier, 0));
 }
 
 File PopupIncludeEditor::getFile() const
@@ -532,13 +627,14 @@ void PopupIncludeEditor::addEditor(CodeDocument& d, bool isJavascript)
 
 	ed.addKeyPressFunction([this](const KeyPress& k)
 	{
-		if (k == KeyPress::F8Key)
+		if (TopLevelWindowWithKeyMappings::matches(getEditor(), k, TextEditorShortcuts::add_autocomplete_template))
 		{
-			auto id = k.getModifiers().isCommandDown() ?
-				JavascriptProcessor::ScriptContextActions::ClearAutocompleteTemplates :
-				JavascriptProcessor::ScriptContextActions::AddAutocompleteTemplate;
-
-			jp->performPopupMenuAction(id, getEditor());
+			jp->performPopupMenuAction(JavascriptProcessor::ScriptContextActions::AddAutocompleteTemplate, getEditor());
+			return true;
+		}
+		if (TopLevelWindowWithKeyMappings::matches(getEditor(), k, TextEditorShortcuts::clear_autocomplete_templates))
+		{
+			jp->performPopupMenuAction(JavascriptProcessor::ScriptContextActions::ClearAutocompleteTemplates, getEditor());
 			return true;
 		}
 		if (k == KeyPress::F9Key)
@@ -546,17 +642,17 @@ void PopupIncludeEditor::addEditor(CodeDocument& d, bool isJavascript)
 			resultLabel->gotoText();
 			return true;
 		}
-		if (k == KeyPress::F10Key)
+		if (TopLevelWindowWithKeyMappings::matches(getEditor(), k, TextEditorShortcuts::breakpoint_resume))
 		{
 			dynamic_cast<Processor*>(jp.get())->getMainController()->getJavascriptThreadPool().resume();
 			return true;
 		}
-		if (k == KeyPress('f', ModifierKeys::shiftModifier | ModifierKeys::commandModifier, 'F'))
+		if (TopLevelWindowWithKeyMappings::matches(getEditor(), k, TextEditorShortcuts::show_full_search))
 		{
 			jp->performPopupMenuAction(JavascriptProcessor::ScriptContextActions::FindAllOccurences, getEditor());
 			return true;
 		}
-		if (k == KeyPress('g', ModifierKeys::commandModifier, 'g'))
+		if (TopLevelWindowWithKeyMappings::matches(getEditor(), k, TextEditorShortcuts::show_search_replace))
 		{
 			jp->performPopupMenuAction(JavascriptProcessor::ScriptContextActions::SearchAndReplace, getEditor());
 			return true;

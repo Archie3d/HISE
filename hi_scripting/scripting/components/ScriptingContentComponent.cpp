@@ -60,6 +60,8 @@ ScriptContentComponent::ScriptContentComponent(ProcessorWithScriptingContent *p_
 
 	setInterceptsMouseClicks(false, true);
 
+    setWantsKeyboardFocus(true);
+    
 	p->addDeleteListener(this);
 
 	p->addChangeListener(this);
@@ -302,6 +304,10 @@ void ScriptContentComponent::updateComponentVisibility(ScriptCreatedComponentWra
 	}
 
 	const bool e = sc->getScriptObjectProperty(ScriptingApi::Content::ScriptComponent::enabled);
+    
+    if(wrapper->getComponent()->isEnabled() != e)
+        wrapper->getComponent()->repaint();
+    
 	wrapper->getComponent()->setEnabled(e);
 	wrapper->getComponent()->setInterceptsMouseClicks(sc->isClickable(), true);
 
@@ -770,6 +776,29 @@ void MarkdownPreviewPanel::initPanel()
 
 	visibilityChanged();
 	resized();
+}
+
+Component* ScriptContentComponent::SimpleTraverser::getDefaultComponent(Component* parentComponent)
+{
+	if(parentComponent->getWantsKeyboardFocus())
+		return parentComponent;
+
+	return nullptr;
+}
+
+Component* ScriptContentComponent::SimpleTraverser::getNextComponent(Component* current)
+{
+	return nullptr;
+}
+
+Component* ScriptContentComponent::SimpleTraverser::getPreviousComponent(Component* current)
+{
+	return nullptr;
+}
+
+std::vector<Component*> ScriptContentComponent::SimpleTraverser::getAllComponents(Component* parentComponent)
+{
+	return {};
 }
 
 } // namespace hise

@@ -73,17 +73,32 @@ struct ScriptedPostDrawActions
 		int blurAmount;
 	};
 
-	struct addNoise : public DrawActions::PostActionBase
+	struct addNoise : public DrawActions::ActionBase
 	{
-		addNoise(float v) : noise(v) {};
+		addNoise(DrawActions::NoiseMapManager* manager, float v, Rectangle<int> area_, bool monochrom_=false, float scale_=1.0f) : 
+			m(manager),
+			noise(v), 
+			area(area_), 
+			scale(scale_), 
+			monochrom(monochrom_) 
+		{};
 
-		bool needsStackData() const override { return false; }
-		void perform(PostGraphicsRenderer& r) override
+		void perform(Graphics& g) override
 		{
-			r.addNoise(noise);
+			m->drawNoiseMap(g, area, noise, monochrom, scale);
 		}
 
-		float noise;
+		bool wantsCachedImage() const override { return false; };
+		bool wantsToDrawOnParent() const override { return false; }
+
+		DrawActions::NoiseMapManager* m;
+
+		const float noise;
+		const float scale;
+
+		
+		const Rectangle<int> area;
+		const bool monochrom;
 	};
 
 	struct applyHSL : public DrawActions::PostActionBase
@@ -276,18 +291,54 @@ namespace ScriptedDrawActions
 	{
 		fillRoundedRect(Rectangle<float> area_, float cornerSize_) :
 			area(area_), cornerSize(cornerSize_) {};
-		void perform(Graphics& g) { g.fillRoundedRectangle(area, cornerSize); };
+		void perform(Graphics& g) 
+		{ 
+			if(allRounded)
+				g.fillRoundedRectangle(area, cornerSize); 
+			else if (!rounded[0] && !rounded[1] && !rounded[2] && !rounded[3])
+				g.fillRect(area);
+			else
+			{
+				Path p;
+				p.addRoundedRectangle(area.getX(), area.getY(), area.getWidth(), area.getHeight(), 
+									  cornerSize, cornerSize, 
+									  rounded[0], rounded[1], rounded[2], rounded[3]);
+
+				g.fillPath(p);
+			}
+		};
 		Rectangle<float> area;
 		float cornerSize;
+
+		bool allRounded = true;
+		bool rounded[4] = { true, true, true, true };
 	};
 
 	struct drawRoundedRectangle : public DrawActions::ActionBase
 	{
 		drawRoundedRectangle(Rectangle<float> area_, float borderSize_, float cornerSize_) :
 			area(area_), borderSize(borderSize_), cornerSize(cornerSize_) {};
-		void perform(Graphics& g) { g.drawRoundedRectangle(area, cornerSize, borderSize); };
+		void perform(Graphics& g) 
+		{ 
+			if(allRounded)
+				g.drawRoundedRectangle(area, cornerSize, borderSize); 
+			else if (!rounded[0] && !rounded[1] && !rounded[2] && !rounded[3])
+				g.drawRect(area, borderSize);
+			else
+			{
+				Path p;
+				p.addRoundedRectangle(area.getX(), area.getY(), area.getWidth(), area.getHeight(),
+					cornerSize, cornerSize,
+					rounded[0], rounded[1], rounded[2], rounded[3]);
+
+				g.strokePath(p, PathStrokeType(borderSize));
+			}
+		};
 		Rectangle<float> area;
 		float cornerSize, borderSize;
+
+		bool allRounded = true;
+		bool rounded[4] = { true, true, true, true };
 	};
 
 	struct drawImageWithin : public DrawActions::ActionBase
@@ -332,6 +383,14 @@ namespace ScriptedDrawActions
 			y(y_), x1(x1_), x2(x2_) {};
 		void perform(Graphics& g) { g.drawHorizontalLine(y, x1, x2); };
 		int y; float x1; float x2;
+	};
+
+	struct drawVerticalLine : public DrawActions::ActionBase
+	{
+		drawVerticalLine(int x_, float y1_, float y2_) :
+			x(x_), y1(y1_), y2(y2_) {};
+		void perform(Graphics& g) { g.drawVerticalLine(x, y1, y2); };
+		int x; float y1; float y2;
 	};
 
 	struct setOpacity : public DrawActions::ActionBase
@@ -384,6 +443,18 @@ namespace ScriptedDrawActions
 		float scale;
 	};
 
+	struct drawMultiLineText : public DrawActions::ActionBase
+	{
+		drawMultiLineText(const String& text_, int startX_, int baseLineY_, int maxWidth_, Justification j_ = Justification::centred, float leading_ = 0.0f) : text(text_), startX(startX_), baseLineY(baseLineY_), maxWidth(maxWidth_), j(j_), leading(leading_) {};
+		void perform(Graphics& g) override { g.drawMultiLineText(text, startX, baseLineY, maxWidth, j, leading); };
+		String text;
+        int startX;
+        int baseLineY;
+		int maxWidth;
+		Justification j;
+		float leading;
+	};
+
 	struct drawDropShadow : public DrawActions::ActionBase
 	{
 		drawDropShadow(Rectangle<int> r_, DropShadow& shadow_) : r(r_), shadow(shadow_) {};
@@ -402,7 +473,8 @@ namespace ScriptedDrawActions
 
 		void perform(Graphics& g) override
 		{
-			jassert(!mainImage.getBounds().isEmpty());
+			if (mainImage.getBounds().isEmpty())
+				return;
 
 			auto invT = AffineTransform::scale(1.0f / scaleFactor);
 
@@ -505,19 +577,26 @@ namespace ScriptedDrawActions
 					{
 						int safeCount = 0;
 
-						while (glGetError() != GL_NO_ERROR)
-						{
-							safeCount++;
+                        if(OpenGLContext::getCurrentContext() != nullptr)
+                        {
+                            while (glGetError() != GL_NO_ERROR)
+                            {
+                                safeCount++;
 
-							if (safeCount > 10000)
-								break;
-						};
+                                if (safeCount > 10000)
+                                    break;
+                            };
+                            
+                            auto s = StringArray::fromLines(obj->getErrorMessage(true));
+                            s.removeEmptyStrings();
 
-						auto s = StringArray::fromLines(obj->getErrorMessage(true));
-						s.removeEmptyStrings();
-
-						for (auto l : s)
-							handler->logError(l);
+                            for (auto l : s)
+                                handler->logError(l);
+                        }
+                        else
+                        {
+                            handler->logError("Open GL is not enabled");
+                        }
 					}
 #endif
 				}

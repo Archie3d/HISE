@@ -194,21 +194,28 @@ struct ScriptingObjects::ScriptFile::Wrapper
 	API_METHOD_WRAPPER_1(ScriptFile, toString);
 	API_METHOD_WRAPPER_0(ScriptFile, isFile);
 	API_METHOD_WRAPPER_0(ScriptFile, isDirectory);
+	API_METHOD_WRAPPER_0(ScriptFile, hasWriteAccess);
 	API_METHOD_WRAPPER_1(ScriptFile, writeObject);
+	API_METHOD_WRAPPER_2(ScriptFile, writeAsXmlFile);
+	API_METHOD_WRAPPER_0(ScriptFile, loadFromXmlFile);
 	API_METHOD_WRAPPER_1(ScriptFile, writeString);
 	API_METHOD_WRAPPER_2(ScriptFile, writeEncryptedObject);
 	API_METHOD_WRAPPER_3(ScriptFile, writeAudioFile);
 	API_METHOD_WRAPPER_0(ScriptFile, loadAsString);
 	API_METHOD_WRAPPER_0(ScriptFile, loadAsObject);
 	API_METHOD_WRAPPER_0(ScriptFile, loadAsAudioFile);
+	API_METHOD_WRAPPER_0(ScriptFile, getNonExistentSibling);
 	API_METHOD_WRAPPER_0(ScriptFile, deleteFileOrDirectory);
 	API_METHOD_WRAPPER_1(ScriptFile, loadEncryptedObject);
 	API_METHOD_WRAPPER_1(ScriptFile, rename);
 	API_METHOD_WRAPPER_1(ScriptFile, toReferenceString);
 	API_METHOD_WRAPPER_1(ScriptFile, getRelativePathFrom);
+	API_METHOD_WRAPPER_0(ScriptFile, getNumZippedItems);
 	API_VOID_METHOD_WRAPPER_2(ScriptFile, setReadOnly);
 	API_VOID_METHOD_WRAPPER_3(ScriptFile, extractZipFile);
 	API_VOID_METHOD_WRAPPER_0(ScriptFile, show);
+	API_METHOD_WRAPPER_1(ScriptFile, loadAsMidiFile);
+	API_METHOD_WRAPPER_2(ScriptFile, writeMidiFile)
 };
 
 String ScriptingObjects::ScriptFile::getFileNameFromFile(var fileOrString)
@@ -245,6 +252,7 @@ ScriptingObjects::ScriptFile::ScriptFile(ProcessorWithScriptingContent* p, const
 	ADD_API_METHOD_1(startAsProcess);
 	ADD_API_METHOD_0(isDirectory);
 	ADD_API_METHOD_0(deleteFileOrDirectory);
+	ADD_API_METHOD_0(hasWriteAccess);
 	ADD_API_METHOD_1(writeObject);
 	ADD_API_METHOD_1(writeString);
 	ADD_API_METHOD_2(writeEncryptedObject);
@@ -255,10 +263,16 @@ ScriptingObjects::ScriptFile::ScriptFile(ProcessorWithScriptingContent* p, const
 	ADD_API_METHOD_1(loadEncryptedObject);
 	ADD_API_METHOD_1(rename);
 	ADD_API_METHOD_0(show);
+	ADD_API_METHOD_0(getNonExistentSibling);
 	ADD_API_METHOD_3(extractZipFile);
+	ADD_API_METHOD_0(getNumZippedItems);
 	ADD_API_METHOD_2(setReadOnly);
 	ADD_API_METHOD_1(toReferenceString);
 	ADD_API_METHOD_1(getRelativePathFrom);
+	ADD_API_METHOD_0(loadFromXmlFile);
+	ADD_API_METHOD_2(writeAsXmlFile);
+	ADD_API_METHOD_1(loadAsMidiFile);
+	ADD_API_METHOD_2(writeMidiFile);
 }
 
 
@@ -295,6 +309,11 @@ bool ScriptingObjects::ScriptFile::setExecutePermission(bool shouldBeExecutable)
 	return f.setExecutePermission(shouldBeExecutable);
 }
 
+juce::var ScriptingObjects::ScriptFile::getNonExistentSibling()
+{
+	return var(new ScriptFile(getScriptProcessor(), f.getNonexistentSibling(false)));
+}
+
 bool ScriptingObjects::ScriptFile::startAsProcess(String parameters)
 {
 	return f.startAsProcess(parameters);
@@ -304,6 +323,12 @@ String ScriptingObjects::ScriptFile::getHash()
 {
 	return SHA256(f).toHexString();
 };
+
+bool ScriptingObjects::ScriptFile::hasWriteAccess()
+{
+	return f.hasWriteAccess();
+};
+
 
 String ScriptingObjects::ScriptFile::toString(int formatType) const
 {
@@ -368,6 +393,50 @@ bool ScriptingObjects::ScriptFile::writeObject(var jsonData)
 {
 	auto text = JSON::toString(jsonData);
 	return writeString(text);
+}
+
+bool ScriptingObjects::ScriptFile::writeAsXmlFile(var jsonDataToBeXmled, String tagName)
+{
+	ScopedPointer<XmlElement> xml = new XmlElement(tagName);
+
+	auto v = ValueTreeConverters::convertDynamicObjectToValueTree(jsonDataToBeXmled, Identifier(tagName));
+
+	auto s = v.createXml()->createDocument("");
+
+	return writeString(s);
+
+#if 0
+	if (auto obj = jsonDataToBeXmled.getDynamicObject())
+	{
+		for (const auto& p : obj->getProperties())
+		{
+			if (p.value.isString())
+				xml->setAttribute(p.name, p.value.toString());
+			else if (p.value.isInt() || p.value.isInt64())
+				xml->setAttribute(p.name, (int)p.value);
+			else
+				xml->setAttribute(p.name, (double)p.value);
+		}
+	}
+
+	auto content = xml->createDocument("");
+	return writeString(content);
+#endif
+}
+
+
+
+juce::var ScriptingObjects::ScriptFile::loadFromXmlFile()
+{
+	auto s = loadAsString();
+
+	if (auto xml = XmlDocument::parse(s))
+	{
+		auto v = ValueTree::fromXml(*xml);
+		return ValueTreeConverters::convertValueTreeToDynamicObject(v);
+	}
+
+	return var();
 }
 
 bool ScriptingObjects::ScriptFile::writeAudioFile(var audioData, double sampleRate, int bitDepth)
@@ -486,6 +555,85 @@ bool ScriptingObjects::ScriptFile::writeAudioFile(var audioData, double sampleRa
 		reportScriptError("Can't find audio format for file extension " + fileFormat);
 		RETURN_IF_NO_THROW(var());
 	}
+}
+
+bool ScriptingObjects::ScriptFile::writeMidiFile(var eventList, var metadataObject)
+{
+	if (eventList.isArray())
+	{
+		Array<HiseEvent> events;
+
+		for (auto e : *eventList.getArray())
+		{
+			if (auto eh = dynamic_cast<ScriptingMessageHolder*>(e.getObject()))
+			{
+				events.add(eh->getMessageCopy());
+			}
+		}
+
+		HiseMidiSequence::Ptr newSequence = new HiseMidiSequence();
+
+		HiseMidiSequence::TimeSignature t;
+
+		if (metadataObject.getDynamicObject() != nullptr)
+		{
+			auto v = ValueTreeConverters::convertDynamicObjectToValueTree(metadataObject, "TimeSignature");
+			t.restoreFromValueTree(v);
+		}
+
+		newSequence->setLengthFromTimeSignature(t);
+		newSequence->setTimeStampEditFormat(HiseMidiSequence::TimestampEditFormat::Ticks);
+		MidiPlayer::EditAction::writeArrayToSequence(newSequence, events, 120, 44100.0);
+
+		auto tmpFile = newSequence->writeToTempFile();
+
+		if (f.existsAsFile())
+			f.deleteFile();
+
+		return tmpFile.moveFileTo(f);
+	}
+
+	return false;
+}
+
+juce::var ScriptingObjects::ScriptFile::loadAsMidiFile(int trackIndex)
+{
+	if (f.existsAsFile() && f.getFileExtension() == "mid")
+	{
+		HiseMidiSequence::Ptr newSequence = new HiseMidiSequence();
+
+		FileInputStream fis(f);
+		MidiFile mf;
+		mf.readFrom(fis);
+		newSequence->loadFrom(mf);
+
+		newSequence->setTimeStampEditFormat(HiseMidiSequence::TimestampEditFormat::Ticks);
+		newSequence->setCurrentTrackIndex(trackIndex);
+
+		auto v = newSequence->getTimeSignature().exportAsValueTree();
+
+		auto list = newSequence->getEventList(44100.0, 120.0);
+
+		auto obj = ValueTreeConverters::convertValueTreeToDynamicObject(v);
+
+		Array<var> eventList;
+		eventList.ensureStorageAllocated(list.size());
+
+		for (auto e : list)
+		{
+			auto eh = new ScriptingMessageHolder(getScriptProcessor());
+			eh->setMessage(e);
+			eventList.add(var(eh));
+		}
+
+		auto returnObj = new DynamicObject();
+		returnObj->setProperty("TimeSignature", obj);
+		returnObj->setProperty("Events", var(eventList));
+
+		return var(returnObj);
+	}
+
+	return var();
 }
 
 bool ScriptingObjects::ScriptFile::writeString(String text)
@@ -624,6 +772,33 @@ void ScriptingObjects::ScriptFile::show()
 	});
 }
 
+struct PartUpdater : public Timer
+{
+	PartUpdater(const std::function<void()>& f_):
+		f(f_)
+	{
+		startTimer(200);
+	}
+
+	~PartUpdater()
+	{
+		ScopedLock sl(lock);
+		stopTimer();
+	}
+
+	std::function<void()> f;
+
+	void timerCallback() override
+	{
+		ScopedLock sl(lock);
+		f();
+	}
+
+	CriticalSection lock;
+
+	bool abortFlag = false;
+};
+
 void ScriptingObjects::ScriptFile::extractZipFile(var targetDirectory, bool overwriteFiles, var callback)
 {
 	File tf;
@@ -646,6 +821,8 @@ void ScriptingObjects::ScriptFile::extractZipFile(var targetDirectory, bool over
 
 		DynamicObject::Ptr data = new DynamicObject();
 
+		double entryProgress = 0.0;
+
 		data->setProperty("Status", 0);
 		data->setProperty("Progress", 0.0);
 		data->setProperty("TotalBytesWritten", 0);
@@ -656,8 +833,8 @@ void ScriptingObjects::ScriptFile::extractZipFile(var targetDirectory, bool over
 		
 		int64 numBytesWritten = 0;
 
-		WeakCallbackHolder cb(safeThis.get()->getScriptProcessor(), callback, 1);
-		cb.setThisObject(safeThis.get());
+		WeakCallbackHolder cb(safeThis.get()->getScriptProcessor(), safeThis.get(), callback, 1);
+		//cb.setThisObject(safeThis.get());
 		cb.incRefCount();
 
 		if (cb)
@@ -669,7 +846,13 @@ void ScriptingObjects::ScriptFile::extractZipFile(var targetDirectory, bool over
 		data->setProperty("Status", 1);
 		int numEntries = zipFile.getNumEntries();
 		bool callForEachFile = numEntries < 500;
+		
+		int64 numBytesToWrite = 0;
 
+		for (int i = 0; i < numEntries; i++)
+		{
+			numBytesToWrite += zipFile.getEntry(i)->uncompressedSize;
+		}
 
 		for (int i = 0; i < numEntries; i++)
 		{
@@ -689,12 +872,40 @@ void ScriptingObjects::ScriptFile::extractZipFile(var targetDirectory, bool over
 			c->setProperty("TotalBytesWritten", numBytesWritten);
 			c->setProperty("CurrentFile", zipFile.getEntry(i)->filename);
 
-			if (callForEachFile && cb)
+			ScopedPointer<PartUpdater> partUpdater;
+
+			auto entrySize = zipFile.getEntry(i)->uncompressedSize;
+
+			auto updateEntryProgress = entrySize > 200 * 1024 * 1024;
+			
+			if (updateEntryProgress)
+			{
+				auto f = [&]()
+				{
+					auto c2 = c->clone();
+					auto betterProgress = ((double)numBytesWritten + entryProgress * (double)entrySize) / (double)numBytesToWrite;
+
+					safeThis.get()->getScriptProcessor()->getMainController_()->getSampleManager().getPreloadProgress() = betterProgress;
+					c2->setProperty("Progress", betterProgress);
+
+					if (cb)
+					{
+						cb.call1(var(c2.get()));
+					}
+				};
+
+				partUpdater = new PartUpdater(f);
+			}
+			else if (callForEachFile && cb)
 				cb.call1(var(c.get()));
 
-			auto result = zipFile.uncompressEntry(i, tf, overwriteFiles);
 
-			numBytesWritten += zipFile.getEntry(i)->uncompressedSize;
+			auto result = zipFile.uncompressEntry(i, tf, overwriteFiles, &entryProgress);
+
+			
+			partUpdater = nullptr;
+
+			numBytesWritten += entrySize;
 
 			if (result.failed())
 			{
@@ -740,6 +951,12 @@ void ScriptingObjects::ScriptFile::extractZipFile(var targetDirectory, bool over
 	getScriptProcessor()->getMainController_()->getKillStateHandler().killVoicesAndCall(p, cb, MainController::KillStateHandler::SampleLoadingThread);
 }
 
+int ScriptingObjects::ScriptFile::getNumZippedItems()
+{
+	juce::ZipFile zipFile(f);
+	return zipFile.getNumEntries();
+}
+
 void ScriptingObjects::ScriptFile::setReadOnly(bool shouldBeReadOnly, bool applyRecursively)
 {
 	f.setReadOnly(shouldBeReadOnly, applyRecursively);
@@ -758,11 +975,12 @@ struct ScriptingObjects::ScriptDownloadObject::Wrapper
 	API_METHOD_WRAPPER_0(ScriptDownloadObject, getDownloadSpeed);
 };
 
-ScriptingObjects::ScriptDownloadObject::ScriptDownloadObject(ProcessorWithScriptingContent* pwsc, const URL& url, const File& targetFile_, var callback_) :
+ScriptingObjects::ScriptDownloadObject::ScriptDownloadObject(ProcessorWithScriptingContent* pwsc, const URL& url, const String& extraHeader_, const File& targetFile_, var callback_) :
 	ConstScriptingObject(pwsc, 3),
-	callback(pwsc, callback_, 0),
+	callback(pwsc, this, callback_, 0),
 	downloadURL(url),
 	targetFile(targetFile_),
+	extraHeaders(extraHeader_),
 	jp(dynamic_cast<JavascriptProcessor*>(pwsc))
 {
 	data = new DynamicObject();
@@ -855,7 +1073,7 @@ bool ScriptingObjects::ScriptDownloadObject::resumeInternal()
 
 			int status = 0;
 
-			auto wis = downloadURL.createInputStream(false, nullptr, nullptr, String(), 0, nullptr, &status);
+			auto wis = downloadURL.createInputStream(false, nullptr, nullptr, extraHeaders, 0, nullptr, &status);
 
 			auto numTotal = wis != nullptr ? wis->getTotalLength() : 0;
 
@@ -1063,7 +1281,7 @@ void ScriptingObjects::ScriptDownloadObject::start()
 
 	int status = 0;
 
-	auto wis = downloadURL.createInputStream(false, nullptr, nullptr, String(), HISE_SCRIPT_SERVER_TIMEOUT, nullptr, &status);
+	auto wis = downloadURL.createInputStream(false, nullptr, nullptr, extraHeaders, HISE_SCRIPT_SERVER_TIMEOUT, nullptr, &status);
 
 	if (Thread::currentThreadShouldExit())
 		return;
@@ -1111,8 +1329,8 @@ ScriptingObjects::ScriptComplexDataReferenceBase::ScriptComplexDataReferenceBase
 	index(dataIndex),
 	type(type_),
 	holder(otherHolder != nullptr ? otherHolder : dynamic_cast<ExternalDataHolder*>(c)),
-	displayCallback(c, var(), 1),
-	contentCallback(c, var(), 1)
+	displayCallback(c, this, var(), 1),
+	contentCallback(c, this, var(), 1)
 {
 	if (holder != nullptr)
 	{
@@ -1151,9 +1369,10 @@ void ScriptingObjects::ScriptComplexDataReferenceBase::setCallbackInternal(bool 
 	{
 		auto& cb = isDisplay ? displayCallback : contentCallback;
 
-		cb = WeakCallbackHolder(getScriptProcessor(), f, 1);
+		cb = WeakCallbackHolder(getScriptProcessor(), this, f, 1);
 		cb.setThisObject(this);
 		cb.incRefCount();
+		cb.addAsSource(this, "onComplexDataEvent");
 	}
 }
 
@@ -1172,7 +1391,7 @@ struct ScriptingObjects::ScriptAudioFile::Wrapper
 };
 
 ScriptingObjects::ScriptAudioFile::ScriptAudioFile(ProcessorWithScriptingContent* pwsc, int index_, ExternalDataHolder* otherHolder) :
-	ScriptComplexDataReferenceBase(pwsc, 0, snex::ExternalData::DataType::AudioFile, otherHolder)
+	ScriptComplexDataReferenceBase(pwsc, index_, snex::ExternalData::DataType::AudioFile, otherHolder)
 {
 	ADD_API_METHOD_2(setRange);
 	ADD_API_METHOD_1(loadFile);
@@ -1294,6 +1513,8 @@ struct ScriptingObjects::ScriptRingBuffer::Wrapper
 	API_METHOD_WRAPPER_0(ScriptRingBuffer, getReadBuffer);
 	API_METHOD_WRAPPER_3(ScriptRingBuffer, createPath);
 	API_METHOD_WRAPPER_2(ScriptRingBuffer, getResizedBuffer);
+    API_VOID_METHOD_WRAPPER_1(ScriptRingBuffer, setActive);
+	API_VOID_METHOD_WRAPPER_1(ScriptRingBuffer, setRingBufferProperties);
 };
 
 ScriptingObjects::ScriptRingBuffer::ScriptRingBuffer(ProcessorWithScriptingContent* pwsc, int index, ExternalDataHolder* other/*=nullptr*/):
@@ -1302,6 +1523,8 @@ ScriptingObjects::ScriptRingBuffer::ScriptRingBuffer(ProcessorWithScriptingConte
 	ADD_API_METHOD_0(getReadBuffer);
 	ADD_API_METHOD_3(createPath);
 	ADD_API_METHOD_2(getResizedBuffer);
+	ADD_API_METHOD_1(setRingBufferProperties);
+    ADD_API_METHOD_1(setActive);
 }
 
 var ScriptingObjects::ScriptRingBuffer::getReadBuffer()
@@ -1370,49 +1593,46 @@ var ScriptingObjects::ScriptRingBuffer::createPath(var dstArea, var sourceRange,
 	if (!r.wasOk())
 		reportScriptError(r.getErrorMessage());
 	
-	auto& b = *getReadBuffer().getBuffer();
-
 	auto hToUse = (int)src.getHeight();
 
-	if (hToUse == -1)
-		hToUse = b.size;
-
-	Range<int> s_range(jmax<int>(0, (int)src.getWidth()), jmin<int>(b.size, hToUse));
-	Range<float> valueRange(jmax<float>(-1.0f, src.getX()), jmin<float>(1.0f, src.getY()));
-
-	int numValues = s_range.getLength();
-	int numPixels = dst.getWidth();
-	auto stride = roundToInt((float)numValues / (float)numPixels);
-
 	auto sp = new PathObject(getScriptProcessor());
-	
-	auto& p = sp->getPath();
 
-	auto startv = valueRange.getEnd() - (double)startValue * valueRange.getLength();
-
-	p.startNewSubPath(0.0f, valueRange.getStart());
-	p.startNewSubPath(0.0f, valueRange.getEnd());
-    p.startNewSubPath(0.0f, startv);
-
-	for (int i = 0; i < numValues; i += stride)
+	if (SimpleRingBuffer::Ptr buffer = getRingBuffer())
 	{
-		int numToLook = jmin(stride, numValues - i);
+		auto maxSize = hToUse = getRingBuffer()->getReadBuffer().getNumSamples();
 
-		auto avg = FloatVectorOperations::findMinAndMax(b.buffer.getReadPointer(0, i), numToLook);
+		if (hToUse == -1)
+			hToUse = maxSize;
 
-		auto value = avg.getEnd();
+		Range<int> s_range(jmax<int>(0, (int)src.getWidth()), jmin<int>(maxSize, hToUse));
+		Range<float> valueRange(jmax<float>(-1.0f, src.getX()), jmin<float>(1.0f, src.getY()));
 
-		if(std::abs(avg.getStart()) > std::abs(avg.getEnd()))
-			value = avg.getStart();
+		SimpleReadWriteLock::ScopedReadLock sl(buffer->getDataLock());
 
-		p.lineTo((float)i, valueRange.getEnd() - valueRange.clipValue(value));
-	};
-
-	p.lineTo(numValues, startv);
-
-	PathFactory::scalePath(p, dst);
+		sp->getPath() = getRingBuffer()->getPropertyObject()->createPath(s_range, valueRange, dst, startValue);
+	}
 
 	return var(sp);
+}
+
+void ScriptingObjects::ScriptRingBuffer::setActive(bool shouldBeActive)
+{
+    if (auto obj = getRingBuffer())
+    {
+        obj->setActive(shouldBeActive);
+    }
+}
+
+void ScriptingObjects::ScriptRingBuffer::setRingBufferProperties(var propertyData)
+{
+	if (auto obj = getRingBuffer()->getPropertyObject())
+	{
+		if (auto dyn = propertyData.getDynamicObject())
+		{
+			for (auto& nv : dyn->getProperties())
+				obj->setProperty(nv.name, nv.value);
+		}
+	}
 }
 
 struct ScriptingObjects::ScriptTableData::Wrapper
@@ -2093,12 +2313,13 @@ struct ScriptingObjects::ScriptingModulator::Wrapper
 	API_METHOD_WRAPPER_0(ScriptingModulator, exportScriptControls);
 	API_METHOD_WRAPPER_3(ScriptingModulator, addModulator);
   API_METHOD_WRAPPER_1(ScriptingModulator, getModulatorChain);
-    
 	API_METHOD_WRAPPER_3(ScriptingModulator, addGlobalModulator);
 	API_METHOD_WRAPPER_3(ScriptingModulator, addStaticGlobalModulator);
 	API_METHOD_WRAPPER_0(ScriptingModulator, asTableProcessor);
 	API_METHOD_WRAPPER_0(ScriptingModulator, getId);
 	API_METHOD_WRAPPER_0(ScriptingModulator, getType);
+	API_METHOD_WRAPPER_2(ScriptingModulator, connectToGlobalModulator);
+	API_METHOD_WRAPPER_0(ScriptingModulator, getGlobalModulatorId);
 };
 
 ScriptingObjects::ScriptingModulator::ScriptingModulator(ProcessorWithScriptingContent *p, Modulator *m_) :
@@ -2142,11 +2363,12 @@ moduleHandler(m_, dynamic_cast<JavascriptProcessor*>(p))
 	ADD_API_METHOD_1(restoreScriptControls);
 	ADD_API_METHOD_0(exportScriptControls);
 	ADD_API_METHOD_3(addModulator);
-  ADD_API_METHOD_1(getModulatorChain);
-    
+  ADD_API_METHOD_1(getModulatorChain);    
 	ADD_API_METHOD_3(addGlobalModulator);
 	ADD_API_METHOD_3(addStaticGlobalModulator);
 	ADD_API_METHOD_0(asTableProcessor);
+	ADD_API_METHOD_2(connectToGlobalModulator);
+	ADD_API_METHOD_0(getGlobalModulatorId);
 }
 
 String ScriptingObjects::ScriptingModulator::getDebugName() const
@@ -2206,6 +2428,34 @@ String ScriptingObjects::ScriptingModulator::getType() const
 	if (checkValidObject())
 		return mod->getType().toString();
 
+	return String();
+}
+
+bool ScriptingObjects::ScriptingModulator::connectToGlobalModulator(String globalModulationContainerId, String modulatorId)
+{
+	if (checkValidObject())
+	{
+        if(auto gm = dynamic_cast<GlobalModulator*>(mod.get()))
+        {
+            return gm->connectToGlobalModulator(globalModulationContainerId + ":" + modulatorId);
+        }
+        else
+            reportScriptError("connectToGlobalModulator() only works with global modulators!");
+	}
+    
+    return false;
+}
+
+String ScriptingObjects::ScriptingModulator::getGlobalModulatorId()
+{
+	if (checkValidObject())
+	{
+		if (mod->getType().toString().startsWith("Global"))
+		{
+			GlobalModulator *gm = dynamic_cast<GlobalModulator*>(m->getProcessor());
+			return gm->getItemEntryFor(gm->getConnectedContainer(), gm->getOriginalModulator());
+		}
+	}
 	return String();
 }
 
@@ -2274,21 +2524,7 @@ bool ScriptingObjects::ScriptingModulator::isBypassed() const
 
 void ScriptingObjects::ScriptingModulator::doubleClickCallback(const MouseEvent &, Component* componentToNotify)
 {
-#if USE_BACKEND
-	if (objectExists() && !objectDeleted())
-	{
-		auto *editor = GET_BACKEND_ROOT_WINDOW(componentToNotify);
-
-		Processor *p = ProcessorHelpers::getFirstProcessorWithName(editor->getMainSynthChain(), mod->getId());
-
-		if (p != nullptr)
-		{
-			editor->getMainPanel()->setRootProcessorWithUndo(p);
-		}
-	}
-#else 
 	ignoreUnused(componentToNotify);
-#endif
 }
 
 Component* ScriptingObjects::ScriptingModulator::createPopupComponent(const MouseEvent& e, Component* t)
@@ -2850,6 +3086,7 @@ ScriptingObjects::ScriptingEffect::FilterModeObject::FilterModeObject(const Proc
 	ADD_FILTER_CONSTANT(LadderFourPoleLP);
 	ADD_FILTER_CONSTANT(LadderFourPoleHP);
 	ADD_FILTER_CONSTANT(RingMod);
+	
 
 #undef ADD_FILTER_CONSTANT
 }
@@ -2863,8 +3100,11 @@ struct ScriptingObjects::ScriptingSlotFX::Wrapper
 {
     API_METHOD_WRAPPER_1(ScriptingSlotFX, setEffect);
     API_VOID_METHOD_WRAPPER_0(ScriptingSlotFX, clear);
-	API_VOID_METHOD_WRAPPER_1(ScriptingSlotFX, swap);
+	API_METHOD_WRAPPER_1(ScriptingSlotFX, swap);
 	API_METHOD_WRAPPER_0(ScriptingSlotFX, getCurrentEffect);
+	API_METHOD_WRAPPER_0(ScriptingSlotFX, getModuleList);
+    API_METHOD_WRAPPER_0(ScriptingSlotFX, getParameterProperties);
+    API_METHOD_WRAPPER_0(ScriptingSlotFX, getCurrentEffectId);
 };
 
 ScriptingObjects::ScriptingSlotFX::ScriptingSlotFX(ProcessorWithScriptingContent *p, EffectProcessor *fx) :
@@ -2891,6 +3131,9 @@ slotFX(fx)
 	ADD_API_METHOD_0(getCurrentEffect);
     ADD_API_METHOD_0(clear);
 	ADD_API_METHOD_1(swap);
+	ADD_API_METHOD_0(getModuleList);
+    ADD_API_METHOD_0(getParameterProperties);
+    ADD_API_METHOD_0(getCurrentEffectId);
 };
 
 
@@ -2899,7 +3142,7 @@ void ScriptingObjects::ScriptingSlotFX::clear()
 {
 	if (auto slot = getSlotFX())
 	{
-        slot->reset();
+        slot->clearEffect();
 	}
 	else
 	{
@@ -2921,17 +3164,15 @@ ScriptingObjects::ScriptingEffect* ScriptingObjects::ScriptingSlotFX::setEffect(
 		auto jp = dynamic_cast<JavascriptProcessor*>(getScriptProcessor());
 
 		{
-			SuspendHelpers::ScopedTicket ticket(slot->getMainController());
+			SuspendHelpers::ScopedTicket ticket(slotFX->getMainController());
 
-			slot->getMainController()->getJavascriptThreadPool().killVoicesAndExtendTimeOut(jp);
+			slotFX->getMainController()->getJavascriptThreadPool().killVoicesAndExtendTimeOut(jp);
 
-			LockHelpers::freeToGo(slot->getMainController());
-			slot->setEffect(effectName);
+			LockHelpers::freeToGo(slotFX->getMainController());
+			slot->setEffect(effectName, false);
 		}
 
-		jassert(slot->getCurrentEffect()->getType() == Identifier(effectName));
-
-		return new ScriptingEffect(getScriptProcessor(), slot->getCurrentEffect());
+		return new ScriptingEffect(getScriptProcessor(), dynamic_cast<EffectProcessor*>(slot->getCurrentEffect()));
     }
 	else
 	{
@@ -2946,14 +3187,14 @@ ScriptingObjects::ScriptingEffect* ScriptingObjects::ScriptingSlotFX::getCurrent
 	{
 		if (auto fx = slot->getCurrentEffect())
 		{
-			return new ScriptingEffect(getScriptProcessor(), fx);
+			return new ScriptingEffect(getScriptProcessor(), dynamic_cast<EffectProcessor*>(fx));
 		}
 	}
 
 	return {};
 }
 
-void ScriptingObjects::ScriptingSlotFX::swap(var otherSlot)
+bool ScriptingObjects::ScriptingSlotFX::swap(var otherSlot)
 {
 	if (auto t = getSlotFX())
 	{
@@ -2961,7 +3202,7 @@ void ScriptingObjects::ScriptingSlotFX::swap(var otherSlot)
 		{
 			if (auto other = sl->getSlotFX())
 			{
-				t->swap(other);
+				return t->swap(other);
 			}
 			else
 			{
@@ -2977,11 +3218,46 @@ void ScriptingObjects::ScriptingSlotFX::swap(var otherSlot)
 	{
 		reportScriptError("Source Slot is invalid");
 	}
+    
+    RETURN_IF_NO_THROW(false);
 }
 
-SlotFX* ScriptingObjects::ScriptingSlotFX::getSlotFX()
+juce::var ScriptingObjects::ScriptingSlotFX::getModuleList()
 {
-	return dynamic_cast<SlotFX*>(slotFX.get());
+	Array<var> list;
+
+	if (auto slot = getSlotFX())
+	{
+		auto sa = slot->getModuleList();
+		
+		for (const auto& s : sa)
+			list.add(var(s));
+	}
+
+	return var(list);
+}
+
+String ScriptingObjects::ScriptingSlotFX::getCurrentEffectId()
+{
+    if (auto slot = getSlotFX())
+    {
+        return slot->getCurrentEffectId();
+    }
+    
+    return "";
+}
+
+var ScriptingObjects::ScriptingSlotFX::getParameterProperties()
+{
+    if(auto slot = getSlotFX())
+        return slot->getParameterProperties();
+    
+    return var();
+}
+
+HotswappableProcessor* ScriptingObjects::ScriptingSlotFX::getSlotFX()
+{
+	return dynamic_cast<HotswappableProcessor*>(slotFX.get());
 }
 
 struct ScriptingObjects::ScriptRoutingMatrix::Wrapper
@@ -2992,6 +3268,7 @@ struct ScriptingObjects::ScriptRoutingMatrix::Wrapper
 	API_METHOD_WRAPPER_2(ScriptRoutingMatrix, removeSendConnection);
 	API_VOID_METHOD_WRAPPER_0(ScriptRoutingMatrix, clear);
 	API_METHOD_WRAPPER_1(ScriptRoutingMatrix, getSourceGainValue);
+	API_VOID_METHOD_WRAPPER_1(ScriptRoutingMatrix, setNumChannels);
 };
 
 ScriptingObjects::ScriptRoutingMatrix::ScriptRoutingMatrix(ProcessorWithScriptingContent *p, Processor *processor):
@@ -3004,6 +3281,7 @@ ScriptingObjects::ScriptRoutingMatrix::ScriptRoutingMatrix(ProcessorWithScriptin
 	ADD_API_METHOD_2(removeSendConnection);
 	ADD_API_METHOD_0(clear);
 	ADD_API_METHOD_1(getSourceGainValue);
+	ADD_API_METHOD_1(setNumChannels);
 
 	if (auto r = dynamic_cast<RoutableProcessor*>(rp.get()))
 	{
@@ -3015,6 +3293,27 @@ ScriptingObjects::ScriptRoutingMatrix::ScriptRoutingMatrix(ProcessorWithScriptin
 		jassertfalse;
 		addConstant("NumInputs", -1);
 		addConstant("NumOutputs", -1);
+	}
+}
+
+void ScriptingObjects::ScriptRoutingMatrix::setNumChannels(int numSourceChannels)
+{
+	if (!isPositiveAndBelow(numSourceChannels, NUM_MAX_CHANNELS + 1))
+	{
+		reportScriptError("illegal channel amount: " + String(numSourceChannels));
+		RETURN_VOID_IF_NO_THROW();
+	}
+
+	if (auto r = dynamic_cast<RoutableProcessor*>(rp.get()))
+	{
+		if (!r->getMatrix().resizingIsAllowed())
+		{
+			reportScriptError("Can't resize this matrix");
+			RETURN_VOID_IF_NO_THROW();
+		}
+
+		r->getMatrix().setNumSourceChannels(numSourceChannels);
+		r->getMatrix().setNumAllowedConnections(numSourceChannels);
 	}
 }
 
@@ -3437,6 +3736,7 @@ struct ScriptingObjects::ScriptingMidiProcessor::Wrapper
 	API_METHOD_WRAPPER_0(ScriptingMidiProcessor, getId);
 	API_METHOD_WRAPPER_0(ScriptingMidiProcessor, asMidiPlayer);
 	
+	
 };
 
 ScriptingObjects::ScriptingMidiProcessor::ScriptingMidiProcessor(ProcessorWithScriptingContent *p, MidiProcessor *mp_) :
@@ -3472,6 +3772,7 @@ mp(mp_)
 	ADD_API_METHOD_1(getAttributeId);
 	ADD_API_METHOD_1(getAttributeIndex);
 	ADD_API_METHOD_0(asMidiPlayer);
+	
 }
 
 Component* ScriptingObjects::ScriptingMidiProcessor::createPopupComponent(const MouseEvent& e, Component* t)
@@ -3660,7 +3961,7 @@ struct ScriptingObjects::ScriptingAudioSampleProcessor::Wrapper
 };
 
 
-ScriptingObjects::ScriptingAudioSampleProcessor::ScriptingAudioSampleProcessor(ProcessorWithScriptingContent *p, AudioSampleProcessor *sampleProcessor) :
+ScriptingObjects::ScriptingAudioSampleProcessor::ScriptingAudioSampleProcessor(ProcessorWithScriptingContent *p, Processor *sampleProcessor) :
 ConstScriptingObject(p, dynamic_cast<Processor*>(sampleProcessor) != nullptr ? dynamic_cast<Processor*>(sampleProcessor)->getNumParameters() : 0),
 audioSampleProcessor(dynamic_cast<Processor*>(sampleProcessor))
 {
@@ -3767,11 +4068,20 @@ void ScriptingObjects::ScriptingAudioSampleProcessor::setFile(String fileName)
 		auto pool = audioSampleProcessor->getMainController()->getCurrentAudioSampleBufferPool();
 
 		if (!fileName.contains("{EXP::") && !pool->areAllFilesLoaded())
-			reportScriptError("You must call Engine.loadAudioFilesIntoPool() before using this method");
+		{
+			PoolReference ref(getScriptProcessor()->getMainController_(), fileName, FileHandlerBase::AudioFiles);
+
+			if (ref.getReferenceString().contains("{PROJECT_FOLDER}"))
+			{
+				reportScriptError("You must call Engine.loadAudioFilesIntoPool() before using this method");
+			}
+		}
+			
 #endif
 
-		auto asp = dynamic_cast<AudioSampleProcessor*>(audioSampleProcessor.get());
-		asp->getBuffer().fromBase64String(fileName);
+		auto p = dynamic_cast<ProcessorWithExternalData*>(audioSampleProcessor.get());
+		jassert(p != nullptr);
+		p->getAudioFile(0)->fromBase64String(fileName);
 	}
 }
 
@@ -3781,7 +4091,7 @@ String ScriptingObjects::ScriptingAudioSampleProcessor::getFilename()
 	{
 		if (checkValidObject())
 		{
-			return dynamic_cast<AudioSampleProcessor*>(audioSampleProcessor.get())->getFileName();
+            return dynamic_cast<ProcessorWithExternalData*>(audioSampleProcessor.get())->getAudioFile(0)->toBase64String();
 		}
 	}
 
@@ -3791,7 +4101,7 @@ String ScriptingObjects::ScriptingAudioSampleProcessor::getFilename()
 var ScriptingObjects::ScriptingAudioSampleProcessor::getSampleStart()
 {
 	if (checkValidObject())
-		return dynamic_cast<AudioSampleProcessor*>(audioSampleProcessor.get())->getBuffer().getCurrentRange().getStart();
+		return dynamic_cast<ProcessorWithExternalData*>(audioSampleProcessor.get())->getAudioFile(0)->getCurrentRange().getStart();
 
 	return 0;
 }
@@ -3799,7 +4109,7 @@ var ScriptingObjects::ScriptingAudioSampleProcessor::getSampleStart()
 void ScriptingObjects::ScriptingAudioSampleProcessor::setSampleRange(int start, int end)
 {
 	if (checkValidObject())
-		dynamic_cast<AudioSampleProcessor*>(audioSampleProcessor.get())->getBuffer().setRange(Range<int>(start, end));
+        return dynamic_cast<ProcessorWithExternalData*>(audioSampleProcessor.get())->getAudioFile(0)->setRange(Range<int>(start, end));
 }
 
 var ScriptingObjects::ScriptingAudioSampleProcessor::getAudioFile(int slotIndex)
@@ -3818,7 +4128,7 @@ int ScriptingObjects::ScriptingAudioSampleProcessor::getSampleLength() const
 {
 	if (checkValidObject())
 	{
-		return dynamic_cast<const AudioSampleProcessor*>(audioSampleProcessor.get())->getBuffer().getCurrentRange().getLength();
+        return dynamic_cast<ProcessorWithExternalData*>(audioSampleProcessor.get())->getAudioFile(0)->getCurrentRange().getLength();
 	}
 	else return 0;
 }
@@ -3989,7 +4299,7 @@ ScriptingObjects::TimerObject::TimerObject(ProcessorWithScriptingContent *p) :
 	ConstScriptingObject(p, 0),
 	ControlledObject(p->getMainController_(), true),
 	it(this),
-	tc(p, {}, 0)
+	tc(p, this, {}, 0)
 {
 	ADD_API_METHOD_0(isTimerRunning);
 	ADD_API_METHOD_1(startTimer);
@@ -4059,9 +4369,10 @@ void ScriptingObjects::TimerObject::stopTimer()
 
 void ScriptingObjects::TimerObject::setTimerCallback(var callbackFunction)
 {
-	tc = WeakCallbackHolder(getScriptProcessor(), callbackFunction, 0);
-	tc.setThisObject(this);
+	tc = WeakCallbackHolder(getScriptProcessor(), this, callbackFunction, 0);
 	tc.incRefCount();
+	tc.setThisObject(this);
+	tc.addAsSource(this, "onTimerCallback");
 }
 
 
@@ -4162,14 +4473,37 @@ ScriptingObjects::ScriptingMessageHolder::ScriptingMessageHolder(ProcessorWithSc
 }
 
 int ScriptingObjects::ScriptingMessageHolder::getNoteNumber() const { return (int)e.getNoteNumber(); }
-var ScriptingObjects::ScriptingMessageHolder::getControllerNumber() const { return (int)e.getControllerNumber(); }
-var ScriptingObjects::ScriptingMessageHolder::getControllerValue() const { return (int)e.getControllerNumber(); }
+var ScriptingObjects::ScriptingMessageHolder::getControllerNumber() const 
+{ 
+	return (int)e.getControllerNumber();
+}
+var ScriptingObjects::ScriptingMessageHolder::getControllerValue() const 
+{ 
+	if (e.isPitchWheel())
+		return e.getPitchWheelValue();
+	else
+		return (int)e.getControllerValue(); 
+}
 int ScriptingObjects::ScriptingMessageHolder::getChannel() const { return (int)e.getChannel(); }
 void ScriptingObjects::ScriptingMessageHolder::setChannel(int newChannel) { e.setChannel(newChannel); }
 void ScriptingObjects::ScriptingMessageHolder::setNoteNumber(int newNoteNumber) { e.setNoteNumber(newNoteNumber); }
 void ScriptingObjects::ScriptingMessageHolder::setVelocity(int newVelocity) { e.setVelocity((uint8)newVelocity); }
-void ScriptingObjects::ScriptingMessageHolder::setControllerNumber(int newControllerNumber) { e.setControllerNumber(newControllerNumber);}
-void ScriptingObjects::ScriptingMessageHolder::setControllerValue(int newControllerValue) { e.setControllerValue(newControllerValue); }
+void ScriptingObjects::ScriptingMessageHolder::setControllerNumber(int newControllerNumber) 
+{ 
+	if (newControllerNumber == HiseEvent::AfterTouchCCNumber)
+		e.setType(HiseEvent::Type::Aftertouch);
+	else if (newControllerNumber == HiseEvent::PitchWheelCCNumber)
+		e.setType(HiseEvent::Type::PitchBend);
+	else
+		e.setControllerNumber(newControllerNumber);
+}
+void ScriptingObjects::ScriptingMessageHolder::setControllerValue(int newControllerValue) 
+{ 
+	if (e.isPitchWheel())
+		e.setPitchWheelValue(newControllerValue);
+	else
+		e.setControllerValue(newControllerValue); 
+}
 
 void ScriptingObjects::ScriptingMessageHolder::setType(int type)
 {
@@ -4197,16 +4531,28 @@ void ScriptingObjects::ScriptingMessageHolder::addToTimestamp(int deltaSamples) 
 void ScriptingObjects::ScriptingMessageHolder::setStartOffset(int offset) { e.setStartOffset((uint16)offset); }
 bool ScriptingObjects::ScriptingMessageHolder::isNoteOn() const { return e.isNoteOn(); }
 bool ScriptingObjects::ScriptingMessageHolder::isNoteOff() const { return e.isNoteOff(); }
-bool ScriptingObjects::ScriptingMessageHolder::isController() const { return e.isController(); }
+bool ScriptingObjects::ScriptingMessageHolder::isController() const { return e.isController() || e.isPitchWheel() || e.isAftertouch(); }
 
 String ScriptingObjects::ScriptingMessageHolder::dump() const
 {
+
 	String x;
 	x << "Type: " << e.getTypeAsString() << ", ";
 	x << "Channel: " << String(e.getChannel()) << ", ";
-	x << "Number: " << String(e.getNoteNumber()) << ", ";
-	x << "Value: " << String(e.getVelocity()) << ", ";
-	x << "EventId: " << String(e.getEventId()) << ", ";
+
+	if (e.isPitchWheel())
+	{
+		x << "Value: " << String(e.getPitchWheelValue()) << ", ";
+	}
+	else
+	{
+		x << "Number: " << String(e.getNoteNumber()) << ", ";
+		x << "Value: " << String(e.getVelocity()) << ", ";
+		x << "EventId: " << String(e.getEventId()) << ", ";
+	}
+
+	
+	
 	x << "Timestamp: " << String(e.getTimeStamp()) << ", ";
 
 	return x;
@@ -4406,13 +4752,24 @@ struct ScriptingObjects::ScriptedMidiPlayer::Wrapper
 	API_METHOD_WRAPPER_0(ScriptedMidiPlayer, isEmpty);
 	API_METHOD_WRAPPER_0(ScriptedMidiPlayer, getNumTracks);
 	API_METHOD_WRAPPER_0(ScriptedMidiPlayer, getNumSequences);
+	API_METHOD_WRAPPER_0(ScriptedMidiPlayer, getTicksPerQuarter);
+	API_VOID_METHOD_WRAPPER_1(ScriptedMidiPlayer, setUseTimestampInTicks);
 	API_METHOD_WRAPPER_0(ScriptedMidiPlayer, getTimeSignature);
 	API_METHOD_WRAPPER_1(ScriptedMidiPlayer, setTimeSignature);
+	API_METHOD_WRAPPER_0(ScriptedMidiPlayer, getLastPlayedNotePosition);
+	API_VOID_METHOD_WRAPPER_1(ScriptedMidiPlayer, setSyncToMasterClock);
+	API_VOID_METHOD_WRAPPER_1(ScriptedMidiPlayer, setSequenceCallback);
+	API_VOID_METHOD_WRAPPER_1(ScriptedMidiPlayer, setAutomationHandlerConsumesControllerEvents);
+	API_METHOD_WRAPPER_0(ScriptedMidiPlayer, asMidiProcessor);
+	API_VOID_METHOD_WRAPPER_1(ScriptedMidiPlayer, setGlobalPlaybackRatio);
+	API_VOID_METHOD_WRAPPER_2(ScriptedMidiPlayer, setPlaybackCallback);
+	API_VOID_METHOD_WRAPPER_1(ScriptedMidiPlayer, setUseGlobalUndoManager);
 };
 
 ScriptingObjects::ScriptedMidiPlayer::ScriptedMidiPlayer(ProcessorWithScriptingContent* p, MidiPlayer* player_):
 	MidiPlayerBaseType(player_),
-	ConstScriptingObject(p, 0)
+	ConstScriptingObject(p, 0),
+	updateCallback(p, this, var(), 1)
 {
 	ADD_API_METHOD_0(getPlaybackPosition);
 	ADD_API_METHOD_1(setPlaybackPosition);
@@ -4438,10 +4795,21 @@ ScriptingObjects::ScriptedMidiPlayer::ScriptedMidiPlayer(ProcessorWithScriptingC
 	ADD_API_METHOD_0(getNumSequences);
 	ADD_API_METHOD_0(getTimeSignature);
 	ADD_API_METHOD_1(setTimeSignature);
+	ADD_API_METHOD_1(setSyncToMasterClock);
+	ADD_API_METHOD_1(setUseTimestampInTicks);
+	ADD_API_METHOD_0(getTicksPerQuarter);
+	ADD_API_METHOD_0(getLastPlayedNotePosition);
+	ADD_API_METHOD_1(setAutomationHandlerConsumesControllerEvents);
+	ADD_API_METHOD_1(setSequenceCallback);
+	ADD_API_METHOD_0(asMidiProcessor);
+	ADD_API_METHOD_1(setGlobalPlaybackRatio);
+	ADD_API_METHOD_2(setPlaybackCallback);
+	ADD_API_METHOD_1(setUseGlobalUndoManager);
 }
 
 ScriptingObjects::ScriptedMidiPlayer::~ScriptedMidiPlayer()
 {
+	cancelUpdates();
 	connectedPanel = nullptr;
 }
 
@@ -4453,36 +4821,10 @@ juce::String ScriptingObjects::ScriptedMidiPlayer::getDebugValue() const
 	return String(getPlayer()->getPlaybackPosition(), 2);
 }
 
-juce::String ScriptingObjects::ScriptedMidiPlayer::getDebugName() const
-{
-
-	if (!sequenceValid())
-		return {};
-
-	if (auto seq = getPlayer()->getCurrentSequence())
-		return seq->getId().toString();
-
-	return "No sequence loaded";
-}
-
-void ScriptingObjects::ScriptedMidiPlayer::trackIndexChanged()
-{
-	if (auto panel = dynamic_cast<ScriptingApi::Content::ScriptPanel*>(connectedPanel.get()))
-	{
-		panel->repaint();
-	}
-}
-
-void ScriptingObjects::ScriptedMidiPlayer::sequenceIndexChanged()
-{
-	if (auto panel = dynamic_cast<ScriptingApi::Content::ScriptPanel*>(connectedPanel.get()))
-	{
-		panel->repaint();
-	}
-}
-
 void ScriptingObjects::ScriptedMidiPlayer::sequencesCleared()
 {
+	callUpdateCallback();
+
 	if (auto panel = dynamic_cast<ScriptingApi::Content::ScriptPanel*>(connectedPanel.get()))
 	{
 		panel->repaint();
@@ -4501,6 +4843,8 @@ void ScriptingObjects::ScriptedMidiPlayer::timerCallback()
 		}
 	}
 }
+
+
 
 var ScriptingObjects::ScriptedMidiPlayer::getNoteRectangleList(var targetBounds)
 {
@@ -4538,6 +4882,31 @@ var ScriptingObjects::ScriptedMidiPlayer::getPlaybackPosition()
 	return getPlayer()->getPlaybackPosition();
 }
 
+juce::var ScriptingObjects::ScriptedMidiPlayer::getLastPlayedNotePosition() const
+{
+	if (getPlayer()->getPlayState() == MidiPlayer::PlayState::Stop)
+		return -1;
+
+	if (auto seq = getPlayer()->getCurrentSequence())
+	{
+		return seq->getLastPlayedNotePosition();
+	}
+
+	return 0;
+}
+
+void ScriptingObjects::ScriptedMidiPlayer::setSyncToMasterClock(bool shouldSyncToMasterClock)
+{
+	if (shouldSyncToMasterClock && !getScriptProcessor()->getMainController_()->getMasterClock().isGridEnabled())
+	{
+		reportScriptError("You have to enable the master clock before using this method");
+	}
+	else
+	{
+		getPlayer()->setSyncToMasterClock(shouldSyncToMasterClock);
+	}
+}
+
 void ScriptingObjects::ScriptedMidiPlayer::setRepaintOnPositionChange(var shouldRepaintPanel)
 {
 	if ((bool)shouldRepaintPanel != repaintOnPlaybackChange)
@@ -4549,6 +4918,14 @@ void ScriptingObjects::ScriptedMidiPlayer::setRepaintOnPositionChange(var should
 		else
 			stopTimer();
 	}
+}
+
+void ScriptingObjects::ScriptedMidiPlayer::setUseGlobalUndoManager(bool shouldUseGlobalUndoManager)
+{
+	if (shouldUseGlobalUndoManager)
+		getPlayer()->setExternalUndoManager(getScriptProcessor()->getMainController_()->getControlUndoManager());
+	else
+		getPlayer()->setExternalUndoManager(nullptr);
 }
 
 void ScriptingObjects::ScriptedMidiPlayer::connectToPanel(var panel)
@@ -4563,12 +4940,17 @@ void ScriptingObjects::ScriptedMidiPlayer::connectToPanel(var panel)
 
 var ScriptingObjects::ScriptedMidiPlayer::getEventList()
 {
-	if (!sequenceValid())
-		return {};
-
-	auto list = getPlayer()->getCurrentSequence()->getEventList(getPlayer()->getSampleRate(), getPlayer()->getMainController()->getBpm());
-
 	Array<var> eventHolders;
+
+	if (!sequenceValid())
+		return var(eventHolders);
+
+	auto sr = getPlayer()->getSampleRate();
+	auto bpm = getPlayer()->getMainController()->getBpm();
+
+	getPlayer()->getCurrentSequence()->setTimeStampEditFormat(useTicks ? HiseMidiSequence::TimestampEditFormat::Ticks : HiseMidiSequence::TimestampEditFormat::Samples);
+
+	auto list = getPlayer()->getCurrentSequence()->getEventList(sr, bpm);
 
 	for (const auto& e : list)
 	{
@@ -4597,10 +4979,23 @@ void ScriptingObjects::ScriptedMidiPlayer::flushMessageList(var messageList)
 				reportScriptError("Illegal item in message list: " + e.toString());
 		}
 
+		if (auto seq = getPlayer()->getCurrentSequence())
+			seq->setTimeStampEditFormat(useTicks ? HiseMidiSequence::TimestampEditFormat::Ticks : HiseMidiSequence::TimestampEditFormat::Samples);
+
 		getPlayer()->flushEdit(events);
 	}
 	else
 		reportScriptError("Input is not an array");
+}
+
+void ScriptingObjects::ScriptedMidiPlayer::setUseTimestampInTicks(bool shouldUseTimestamps)
+{
+	useTicks = shouldUseTimestamps;
+}
+
+int ScriptingObjects::ScriptedMidiPlayer::getTicksPerQuarter() const
+{
+	return HiseMidiSequence::TicksPerQuarter;
 }
 
 void ScriptingObjects::ScriptedMidiPlayer::create(int nominator, int denominator, int barLength)
@@ -4614,6 +5009,7 @@ void ScriptingObjects::ScriptedMidiPlayer::create(int nominator, int denominator
 	
 	HiseMidiSequence::Ptr seq = new HiseMidiSequence();
 	seq->setLengthFromTimeSignature(sig);
+	seq->createEmptyTrack();
 	getPlayer()->addSequence(seq);
 }
 
@@ -4811,9 +5207,65 @@ bool ScriptingObjects::ScriptedMidiPlayer::setTimeSignature(var timeSignatureObj
 	return false;
 }
 
+void ScriptingObjects::ScriptedMidiPlayer::setAutomationHandlerConsumesControllerEvents(bool shouldBeEnabled)
+{
+	if (auto player = getPlayer())
+	{
+		player->setMidiControlAutomationHandlerConsumesControllerEvents(shouldBeEnabled);
+	}
+}
+
+void ScriptingObjects::ScriptedMidiPlayer::setSequenceCallback(var updateFunction)
+{
+	if (HiseJavascriptEngine::isJavascriptFunction(updateFunction))
+	{
+		updateCallback = WeakCallbackHolder(getScriptProcessor(), this, updateFunction, 1);
+		updateCallback.incRefCount();
+		updateCallback.addAsSource(this, "onMidiSequenceUpdate");
+
+		callUpdateCallback();
+	}
+}
+
+void ScriptingObjects::ScriptedMidiPlayer::setPlaybackCallback(var newPlaybackCallback, bool synchronous)
+{
+	playbackUpdater = nullptr;
+
+	if (HiseJavascriptEngine::isJavascriptFunction(newPlaybackCallback))
+	{
+		playbackUpdater = new PlaybackUpdater(*this, newPlaybackCallback, synchronous);
+	}
+}
+
+juce::var ScriptingObjects::ScriptedMidiPlayer::asMidiProcessor()
+{
+	if (auto p = getPlayer())
+	{
+		return var(new ScriptingMidiProcessor(getScriptProcessor(), p));
+	}
+
+	return var();
+}
+
+void ScriptingObjects::ScriptedMidiPlayer::setGlobalPlaybackRatio(double globalRatio)
+{
+	getScriptProcessor()->getMainController_()->setGlobalMidiPlaybackSpeed(globalRatio);
+}
+
+void ScriptingObjects::ScriptedMidiPlayer::callUpdateCallback()
+{
+	if (updateCallback)
+	{
+		var thisVar(this);
+
+		updateCallback.call(&thisVar, 1);
+	}
+}
+
 void ScriptingObjects::ScriptedMidiPlayer::sequenceLoaded(HiseMidiSequence::Ptr newSequence)
 {
-
+	callUpdateCallback();
+	
 }
 
 int ScriptingObjects::ScriptedMidiPlayer::getNumTracks()
@@ -4846,6 +5298,7 @@ juce::Array<juce::Identifier> ApiHelpers::getGlobalApiClasses()
 		"Engine",
 		"Console",
 		"Content",
+        "Colours",
 		"Sampler",
 		"Synth",
 		"Math",
@@ -4856,6 +5309,36 @@ juce::Array<juce::Identifier> ApiHelpers::getGlobalApiClasses()
 	};
 	
 	return ids;
+}
+
+void ApiHelpers::loadPathFromData(Path& p, var data)
+{
+	
+	if (data.isString())
+	{
+		juce::MemoryBlock mb;
+		mb.fromBase64Encoding(data.toString());
+		p.clear();
+		p.loadPathFromData(mb.getData(), mb.getSize());
+	}
+	else if (data.isArray())
+	{
+		p.clear();
+		Array<unsigned char> pathData;
+		Array<var> *varData = data.getArray();
+		const int numElements = varData->size();
+
+		pathData.ensureStorageAllocated(numElements);
+
+		for (int i = 0; i < numElements; i++)
+			pathData.add(static_cast<unsigned char>((int)varData->getUnchecked(i)));
+
+		p.loadPathFromData(pathData.getRawDataPointer(), numElements);
+	}
+	else if (auto sp = dynamic_cast<ScriptingObjects::PathObject*>(data.getObject()))
+	{
+		p = sp->getPath();
+	}
 }
 
 juce::PathStrokeType ApiHelpers::createPathStrokeType(var strokeType)
@@ -4942,7 +5425,7 @@ struct ScriptingObjects::ScriptUnorderedStack::Wrapper
 
 ScriptingObjects::ScriptUnorderedStack::ScriptUnorderedStack(ProcessorWithScriptingContent *p):
 	ConstScriptingObject(p, 5),
-	compareFunction(p, var(), 2)
+	compareFunction(p, this, var(), 2)
 {
 	ADD_API_METHOD_0(isEmpty);
 	ADD_API_METHOD_0(size);
@@ -5339,7 +5822,7 @@ void ScriptingObjects::ScriptUnorderedStack::setIsEventStack(bool shouldBeEventS
 
 	if (eventCompareFunction.isObject())
 	{
-		compareFunction = WeakCallbackHolder(getScriptProcessor(), eventCompareFunction, 2);
+		compareFunction = WeakCallbackHolder(getScriptProcessor(), this, eventCompareFunction, 2);
 		compareFunctionType = CompareFunctions::Custom;
 
 		if (compareFunction)
@@ -5436,6 +5919,7 @@ struct ScriptingObjects::ScriptBackgroundTask::Wrapper
 	API_METHOD_WRAPPER_1(ScriptBackgroundTask, getProperty);
 	API_VOID_METHOD_WRAPPER_1(ScriptBackgroundTask, setFinishCallback);
 	API_VOID_METHOD_WRAPPER_1(ScriptBackgroundTask, callOnBackgroundThread);
+	API_METHOD_WRAPPER_1(ScriptBackgroundTask, killVoicesAndCall);
 	API_METHOD_WRAPPER_0(ScriptBackgroundTask, getProgress);
 	API_VOID_METHOD_WRAPPER_1(ScriptBackgroundTask, setProgress);
 	API_VOID_METHOD_WRAPPER_1(ScriptBackgroundTask, setTimeOut);
@@ -5447,21 +5931,29 @@ struct ScriptingObjects::ScriptBackgroundTask::Wrapper
 ScriptingObjects::ScriptBackgroundTask::ScriptBackgroundTask(ProcessorWithScriptingContent* p, const String& name) :
 	ConstScriptingObject(p, 0),
 	Thread(name),
-	currentTask(p, var(), 1),
-	finishCallback(p, var(), 2)
+	currentTask(p, this, var(), 1),
+	finishCallback(p, this, var(), 2)
 {
+	dynamic_cast<JavascriptProcessor*>(p)->getScriptEngine()->preCompileListeners.addListener(*this, recompiled, false);
+
 	ADD_API_METHOD_1(sendAbortSignal);
 	ADD_API_METHOD_0(shouldAbort);
 	ADD_API_METHOD_2(setProperty);
 	ADD_API_METHOD_1(getProperty);
 	ADD_API_METHOD_1(setFinishCallback);
 	ADD_API_METHOD_1(callOnBackgroundThread);
+	ADD_API_METHOD_1(killVoicesAndCall);
 	ADD_API_METHOD_0(getProgress);
 	ADD_API_METHOD_1(setProgress);
 	ADD_API_METHOD_1(setTimeOut);
 	ADD_API_METHOD_1(setStatusMessage);
 	ADD_API_METHOD_0(getStatusMessage);
 	ADD_API_METHOD_1(setForwardStatusToLoadingThread);
+}
+
+void ScriptingObjects::ScriptBackgroundTask::recompiled(ScriptBackgroundTask& task, bool unused)
+{
+	task.sendAbortSignal(true);
 }
 
 void ScriptingObjects::ScriptBackgroundTask::sendAbortSignal(bool blockUntilStopped)
@@ -5515,9 +6007,10 @@ void ScriptingObjects::ScriptBackgroundTask::setFinishCallback(var newFinishCall
 {
 	if (HiseJavascriptEngine::isJavascriptFunction(newFinishCallback))
 	{
-		finishCallback = WeakCallbackHolder(getScriptProcessor(), newFinishCallback, 2);
+		finishCallback = WeakCallbackHolder(getScriptProcessor(), this, newFinishCallback, 2);
 		finishCallback.setThisObject(this);
 		finishCallback.incRefCount();
+		finishCallback.addAsSource(this, "onTaskFinished");
 	}
 }
 
@@ -5527,10 +6020,41 @@ void ScriptingObjects::ScriptBackgroundTask::callOnBackgroundThread(var backgrou
 	{
 		callFinishCallback(false, false);
 		stopThread(timeOut);
-		currentTask = WeakCallbackHolder(getScriptProcessor(), backgroundTaskFunction, 1);
+		currentTask = WeakCallbackHolder(getScriptProcessor(), this, backgroundTaskFunction, 1);
 		currentTask.incRefCount();
+		currentTask.addAsSource(this, "backgroundFunction");
 		startThread(6);
 	}
+}
+
+bool ScriptingObjects::ScriptBackgroundTask::killVoicesAndCall(var loadingFunction)
+{
+	if (HiseJavascriptEngine::isJavascriptFunction(loadingFunction))
+	{
+		stopThread(timeOut);
+		currentTask = WeakCallbackHolder(getScriptProcessor(), this, loadingFunction, 0);
+		currentTask.incRefCount();
+		currentTask.addAsSource(this, "backgroundFunction");
+
+		WeakReference<ScriptBackgroundTask> safeThis(this);
+
+		auto f = [safeThis](Processor* p)
+		{
+			if (safeThis != nullptr)
+			{
+				auto r = safeThis->currentTask.callSync(nullptr, 0, nullptr);
+
+				if (!r.wasOk())
+					debugError(p, r.getErrorMessage());
+			}
+				
+			return SafeFunctionCall::OK;
+		};
+
+		return getScriptProcessor()->getMainController_()->getKillStateHandler().killVoicesAndCall(dynamic_cast<Processor*>(getScriptProcessor()), f, MainController::KillStateHandler::SampleLoadingThread);
+	}
+
+	return false;
 }
 
 void ScriptingObjects::ScriptBackgroundTask::setProgress(double p)
@@ -5587,8 +6111,8 @@ void ScriptingObjects::ScriptBackgroundTask::run()
 
 ScriptingObjects::ScriptFFT::ScriptFFT(ProcessorWithScriptingContent* p) :
 	ConstScriptingObject(p, WindowType::numWindowType),
-	phaseFunction(p, var(), 2),
-	magnitudeFunction(p, var(), 2)
+	phaseFunction(p, this, var(), 2),
+	magnitudeFunction(p, this, var(), 2)
 {
 	addConstant("Rectangle", WindowType::Rectangle);
 	addConstant("Triangle", WindowType::Triangle);
@@ -5682,7 +6206,7 @@ void ScriptingObjects::ScriptFFT::setMagnitudeFunction(var newMagnitudeFunction,
 	if (HiseJavascriptEngine::isJavascriptFunction(newMagnitudeFunction))
 	{
 		convertMagnitudesToDecibel = convertDb;
-		magnitudeFunction = WeakCallbackHolder(getScriptProcessor(), newMagnitudeFunction, 2);
+		magnitudeFunction = WeakCallbackHolder(getScriptProcessor(), this, newMagnitudeFunction, 2);
 		magnitudeFunction.incRefCount();
 		reinitialise();
 	}
@@ -5694,7 +6218,7 @@ void ScriptingObjects::ScriptFFT::setPhaseFunction(var newPhaseFunction)
 
 	if (HiseJavascriptEngine::isJavascriptFunction(newPhaseFunction))
 	{
-		phaseFunction = WeakCallbackHolder(getScriptProcessor(), newPhaseFunction, 2);
+		phaseFunction = WeakCallbackHolder(getScriptProcessor(), this, newPhaseFunction, 2);
 		phaseFunction.incRefCount();
 		reinitialise();
 	}
@@ -6049,17 +6573,36 @@ void ScriptingObjects::ScriptFFT::applyInverseFFT(int numChannelsThisTime)
 struct ScriptingObjects::GlobalRoutingManagerReference::Wrapper
 {
 	API_METHOD_WRAPPER_1(GlobalRoutingManagerReference, getCable);
+	API_METHOD_WRAPPER_2(GlobalRoutingManagerReference, connectToOSC);
+	API_METHOD_WRAPPER_2(GlobalRoutingManagerReference, sendOSCMessage);
+	API_VOID_METHOD_WRAPPER_2(GlobalRoutingManagerReference, addOSCCallback);
 };
 
 
 ScriptingObjects::GlobalRoutingManagerReference::GlobalRoutingManagerReference(ProcessorWithScriptingContent* sp) :
 	ConstScriptingObject(sp, 0),
-	ControlledObject(sp->getMainController_())
+	ControlledObject(sp->getMainController_()),
+	errorCallback(sp, this, var(), 1)
 {
 	auto ptr = scriptnode::routing::GlobalRoutingManager::Helpers::getOrCreate(getMainController());
 	manager = ptr.get();
 
 	ADD_API_METHOD_1(getCable);
+	ADD_API_METHOD_2(connectToOSC);
+	ADD_API_METHOD_2(sendOSCMessage);
+	ADD_API_METHOD_2(addOSCCallback);
+}
+
+ScriptingObjects::GlobalRoutingManagerReference::~GlobalRoutingManagerReference()
+{
+	if (auto m = dynamic_cast<scriptnode::routing::GlobalRoutingManager*>(manager.getObject()))
+	{
+		if (auto r = dynamic_cast<OSCReceiver*>(m->receiver.get()))
+			r->removeListener(this);
+
+		for (auto c : callbacks)
+			m->scriptCallbackPatterns.removeAllInstancesOf(c->fullAddress);
+	}
 }
 
 scriptnode::routing::GlobalRoutingManager::Cable* getCableFromVar(const var& v)
@@ -6077,6 +6620,38 @@ Component* ScriptingObjects::GlobalRoutingManagerReference::createPopupComponent
 	return scriptnode::routing::GlobalRoutingManager::Helpers::createDebugViewer(getScriptProcessor()->getMainController_());
 }
 
+void ScriptingObjects::GlobalRoutingManagerReference::oscBundleReceived(const OSCBundle& bundle)
+{
+	for (const auto& element : bundle)
+	{
+		if (element.isMessage())
+			oscMessageReceived(element.getMessage());
+		else if (element.isBundle())
+			oscBundleReceived(element.getBundle());
+	}
+}
+
+void ScriptingObjects::GlobalRoutingManagerReference::oscMessageReceived(const OSCMessage& message)
+{
+	if (auto m = dynamic_cast<scriptnode::routing::GlobalRoutingManager*>(manager.getObject()))
+	{
+		auto ap = message.getAddressPattern();
+
+		if (!ap.containsWildcards())
+		{
+			OSCAddress a(ap.toString());
+
+			for (auto c : callbacks)
+			{
+				if (c->shouldFire(a))
+				{
+					c->callForMessage(message);
+				}
+			}
+		}
+	}
+}
+
 juce::var ScriptingObjects::GlobalRoutingManagerReference::getCable(String cableId)
 {
 	if (auto m = dynamic_cast<scriptnode::routing::GlobalRoutingManager*>(manager.getObject()))
@@ -6089,6 +6664,109 @@ juce::var ScriptingObjects::GlobalRoutingManagerReference::getCable(String cable
 	return var();
 }
 
+bool ScriptingObjects::GlobalRoutingManagerReference::connectToOSC(var connectionData, var errorFunction)
+{
+	
+	if (auto m = dynamic_cast<scriptnode::routing::GlobalRoutingManager*>(manager.getObject()))
+	{
+		if (HiseJavascriptEngine::isJavascriptFunction(errorFunction))
+		{
+			errorCallback = WeakCallbackHolder(getScriptProcessor(), this, errorFunction, 1);
+			errorCallback.incRefCount();
+
+			m->setOSCErrorHandler(this);
+		}
+		else
+		{
+			errorCallback = WeakCallbackHolder(getScriptProcessor(), this, var(), 1);
+			m->setOSCErrorHandler(nullptr);
+		}
+
+		scriptnode::OSCConnectionData::Ptr data = new scriptnode::OSCConnectionData(connectionData);
+		auto ok = m->connectToOSC(data);
+
+		if (ok)
+		{
+			if (auto r = dynamic_cast<juce::OSCReceiver*>(m->receiver.get()))
+			{
+				r->addListener(this);
+
+				for (auto c : callbacks)
+				{
+					c->rebuildFullAddress(m->lastData->domain);
+					m->scriptCallbackPatterns.addIfNotAlreadyThere(c->fullAddress);
+				}
+					
+
+
+			}
+		}
+
+	}
+
+	return false;
+}
+
+void ScriptingObjects::GlobalRoutingManagerReference::OSCCallback::callForMessage(const OSCMessage& c)
+{
+	if (c.isEmpty())
+		return;
+
+	auto getVar = [](const OSCArgument& a)
+	{
+		if (a.isFloat32())
+			return var(a.getFloat32());
+		if (a.isString())
+			return var(a.getString());
+		if (a.isInt32())
+			return var(a.getInt32());
+
+		return var();
+	};
+
+	if (c.size() == 1)
+		args[1] = getVar(c[0]);
+	else
+	{
+		auto newArray = Array<var>();
+
+		for (auto& a : c)
+			newArray.add(getVar(a));
+
+		args[1] = var(newArray);
+	}
+
+	callback.call(args, 2);
+}
+
+void ScriptingObjects::GlobalRoutingManagerReference::addOSCCallback(String oscSubAddress, var callback)
+{
+	if (auto m = dynamic_cast<scriptnode::routing::GlobalRoutingManager*>(manager.getObject()))
+	{
+		auto c = new OSCCallback(this, oscSubAddress, callback);
+
+		if (m->lastData != nullptr)
+		{
+			c->rebuildFullAddress(m->lastData->domain);
+			m->scriptCallbackPatterns.addIfNotAlreadyThere(c->fullAddress);
+		}
+		
+		callbacks.add(c);
+	}
+}
+
+
+
+bool ScriptingObjects::GlobalRoutingManagerReference::sendOSCMessage(String oscSubAddress, var data)
+{
+	if (auto m = dynamic_cast<scriptnode::routing::GlobalRoutingManager*>(manager.getObject()))
+	{
+		return m->sendOSCMessageToOutput(oscSubAddress, data);
+	}
+
+	return false;
+}
+
 struct ScriptingObjects::GlobalCableReference::Wrapper
 {
 	API_METHOD_WRAPPER_0(GlobalCableReference, getValue);
@@ -6099,6 +6777,7 @@ struct ScriptingObjects::GlobalCableReference::Wrapper
 	API_VOID_METHOD_WRAPPER_3(GlobalCableReference, setRangeWithSkew);
 	API_VOID_METHOD_WRAPPER_3(GlobalCableReference, setRangeWithStep);
 	API_VOID_METHOD_WRAPPER_2(GlobalCableReference, registerCallback);
+	API_VOID_METHOD_WRAPPER_3(GlobalCableReference, connectToMacroControl);
 };
 
 struct ScriptingObjects::GlobalCableReference::DummyTarget : public scriptnode::routing::GlobalRoutingManager::CableTargetBase
@@ -6162,6 +6841,7 @@ ScriptingObjects::GlobalCableReference::GlobalCableReference(ProcessorWithScript
 	ADD_API_METHOD_3(setRangeWithSkew);
 	ADD_API_METHOD_3(setRangeWithStep);
 	ADD_API_METHOD_2(registerCallback);
+	ADD_API_METHOD_3(connectToMacroControl);
 }
 
 ScriptingObjects::GlobalCableReference::~GlobalCableReference()
@@ -6220,15 +6900,20 @@ struct ScriptingObjects::GlobalCableReference::Callback: public scriptnode::rout
 		SimpleTimer(p.getScriptProcessor()->getMainController_()->getGlobalUIUpdater()),
 		parent(p),
 		sync(synchronous),
-		callback(p.getScriptProcessor(), f, 1)
+		callback(p.getScriptProcessor(), &p, f, 1)
 	{
 		id << dynamic_cast<Processor*>(p.getScriptProcessor())->getId();
 		id << ".";
 
-		if (auto ilf = dynamic_cast<HiseJavascriptEngine::RootObject::InlineFunction::Object*>(f.getObject()))
+		auto ilf = dynamic_cast<WeakCallbackHolder::CallableObject*>(f.getObject());
+
+		if (ilf != nullptr && (!synchronous || ilf->isRealtimeSafe()))
 		{
-			id << ilf->name;
-			funcLocation = ilf->getLocation();
+			if (auto dobj = dynamic_cast<DebugableObjectBase*>(ilf))
+			{
+				id << dobj->getDebugName();
+				funcLocation = dobj->getLocation();
+			}
 
 			callback.incRefCount();
 			callback.setHighPriority();
@@ -6329,5 +7014,686 @@ void ScriptingObjects::GlobalCableReference::registerCallback(var callbackFuncti
 		callbacks.add(nc);
 	}
 }
+
+struct MacroCableTarget : public scriptnode::routing::GlobalRoutingManager::CableTargetBase,
+						 public ControlledObject
+{
+	MacroCableTarget(MainController* mc, int index, bool filterReps) :
+		ControlledObject(mc),
+		macroIndex(index),
+		filterRepetitions(filterReps)
+	{
+		macroData = mc->getMainSynthChain()->getMacroControlData(macroIndex);
+	};
+
+	void selectCallback(Component* rootEditor)
+	{
+		// maybe open the macro panel?
+		jassertfalse;
+	}
+
+	String getTargetId() const override
+	{
+		return "Macro " + String(macroIndex + 1);
+	}
+
+	void sendValue(double v) override
+	{
+		auto newValue = 127.0f * jlimit(0.0f, 1.0f, (float)v);
+		
+		if (!filterRepetitions || lastValue != newValue)
+		{
+			lastValue = newValue;
+			macroData->setValue(newValue);
+		}
+	}
+
+	Path getTargetIcon() const override
+	{
+		Path p;
+		p.loadPathFromData(HiBinaryData::SpecialSymbols::macros, sizeof(HiBinaryData::SpecialSymbols::macros));
+		return p;
+	}
+
+	const bool filterRepetitions;
+	float lastValue = -1.0f;
+	const int macroIndex;
+	WeakReference<MacroControlBroadcaster::MacroControlData> macroData;
+};
+
+
+void ScriptingObjects::GlobalCableReference::connectToMacroControl(int macroIndex, bool macroIsTarget, bool filterRepetitions)
+{
+	if (auto c = getCableFromVar(cable))
+	{
+		if (macroIsTarget)
+		{
+			using CableType = scriptnode::routing::GlobalRoutingManager::CableTargetBase;
+
+			for (int i = 0; i < c->getTargetList().size(); i++)
+			{
+				if (auto m = dynamic_cast<MacroCableTarget*>(c->getTargetList()[i].get()))
+				{
+					if (macroIndex == -1 || m->macroIndex == macroIndex)
+					{
+						c->removeTarget(m);
+						i--;
+						continue;
+					}
+				}
+			}
+
+			if (macroIndex != -1)
+				c->addTarget(new MacroCableTarget(getScriptProcessor()->getMainController_(), macroIndex, filterRepetitions));
+		}
+		else
+		{
+			// not implemented
+			jassertfalse;
+		}
+	}
+}
+
+
+ScriptingObjects::ScriptedMidiPlayer::PlaybackUpdater::PlaybackUpdater(ScriptedMidiPlayer& parent_, var f, bool sync_) :
+	SimpleTimer(parent_.getScriptProcessor()->getMainController_()->getGlobalUIUpdater(), !sync_),
+	sync(sync_),
+	parent(parent_),
+	playbackCallback(parent.getScriptProcessor(), &parent, f, 2)
+{
+	if (auto mp = parent.getPlayer())
+		mp->addPlaybackListener(this);
+
+	playbackCallback.incRefCount();
+	playbackCallback.setThisObject(&parent);
+}
+
+ScriptingObjects::ScriptedMidiPlayer::PlaybackUpdater::~PlaybackUpdater()
+{
+	if (auto mp = parent.getPlayer())
+		mp->removePlaybackListener(this);
+}
+
+void ScriptingObjects::ScriptedMidiPlayer::PlaybackUpdater::timerCallback()
+{
+	if (dirty)
+	{
+		playbackCallback.call(args, 2);
+		dirty = false;
+	}
+}
+
+void ScriptingObjects::ScriptedMidiPlayer::PlaybackUpdater::playbackChanged(int timestamp, MidiPlayer::PlayState newState)
+{
+	args[0] = var(timestamp);
+	args[1] = var((int)newState);
+
+	if (sync)
+		playbackCallback.callSync(args, 2, nullptr);
+	else
+		dirty = true;
+}
+
+struct ScriptingObjects::ScriptedMidiAutomationHandler::Wrapper
+{
+	API_METHOD_WRAPPER_0(ScriptedMidiAutomationHandler, getAutomationDataObject);
+	API_VOID_METHOD_WRAPPER_1(ScriptedMidiAutomationHandler, setAutomationDataFromObject);
+	API_VOID_METHOD_WRAPPER_1(ScriptedMidiAutomationHandler, setControllerNumbersInPopup);
+	API_VOID_METHOD_WRAPPER_1(ScriptedMidiAutomationHandler, setExclusiveMode);
+	API_VOID_METHOD_WRAPPER_1(ScriptedMidiAutomationHandler, setUpdateCallback);
+	API_VOID_METHOD_WRAPPER_1(ScriptedMidiAutomationHandler, setConsumeAutomatedControllers);
+	API_VOID_METHOD_WRAPPER_2(ScriptedMidiAutomationHandler, setControllerNumberNames);
+};
+
+ScriptingObjects::ScriptedMidiAutomationHandler::ScriptedMidiAutomationHandler(ProcessorWithScriptingContent* sp) :
+	ConstScriptingObject(sp, 0),
+	handler(sp->getMainController_()->getMacroManager().getMidiControlAutomationHandler()),
+	updateCallback(getScriptProcessor(), this, var(), 1)
+{
+	handler->addChangeListener(this);
+
+	ADD_API_METHOD_0(getAutomationDataObject);
+	ADD_API_METHOD_1(setAutomationDataFromObject);
+	ADD_API_METHOD_1(setControllerNumbersInPopup);
+	ADD_API_METHOD_1(setExclusiveMode);
+	ADD_API_METHOD_1(setUpdateCallback);
+	ADD_API_METHOD_1(setConsumeAutomatedControllers);
+	ADD_API_METHOD_2(setControllerNumberNames);
+}
+
+ScriptingObjects::ScriptedMidiAutomationHandler::~ScriptedMidiAutomationHandler()
+{
+	handler->removeChangeListener(this);
+}
+
+void ScriptingObjects::ScriptedMidiAutomationHandler::changeListenerCallback(SafeChangeBroadcaster *b)
+{
+	if (updateCallback)
+		updateCallback.call1(getAutomationDataObject());
+}
+
+juce::var ScriptingObjects::ScriptedMidiAutomationHandler::getAutomationDataObject()
+{
+	auto data = handler->exportAsValueTree();
+	return var(ValueTreeConverters::convertFlatValueTreeToVarArray(data));
+}
+
+void ScriptingObjects::ScriptedMidiAutomationHandler::setAutomationDataFromObject(var automationData)
+{
+	auto vt = ValueTreeConverters::convertVarArrayToFlatValueTree(automationData, "MidiAutomation", "Controller");
+	handler->restoreFromValueTree(vt);
+}
+
+void ScriptingObjects::ScriptedMidiAutomationHandler::setControllerNumbersInPopup(var numberArray)
+{
+	BigInteger bi;
+
+	if (auto a = numberArray.getArray())
+	{
+		for (auto v : *a)
+			bi.setBit((int)v, true);
+	}
+
+	handler->setControllerPopupNumbers(bi);
+}
+
+void ScriptingObjects::ScriptedMidiAutomationHandler::setControllerNumberNames(var ccName, var nameArray)
+{
+	handler->setCCName(ccName);
+	
+	StringArray sa;
+
+	if (auto a = nameArray.getArray())
+	{
+		for (const auto& v : *a)
+		{
+			sa.add(v.toString());
+		}
+	}
+
+	handler->setControllerPopupNames(sa);
+}
+
+void ScriptingObjects::ScriptedMidiAutomationHandler::setExclusiveMode(bool shouldBeExclusive)
+{
+	handler->setExclusiveMode(shouldBeExclusive);
+}
+
+void ScriptingObjects::ScriptedMidiAutomationHandler::setUpdateCallback(var callback)
+{
+	if (HiseJavascriptEngine::isJavascriptFunction(callback))
+	{
+		updateCallback = WeakCallbackHolder(getScriptProcessor(), this, callback, 1);
+		updateCallback.incRefCount();
+		updateCallback.addAsSource(this, "onMidiAutomationUpdate");
+		updateCallback.setThisObject(this);
+
+		auto obj = getAutomationDataObject();
+
+		auto r = updateCallback.callSync(&obj, 1);
+
+		if (!r.wasOk())
+			reportScriptError(r.getErrorMessage());
+	}
+}
+
+void ScriptingObjects::ScriptedMidiAutomationHandler::setConsumeAutomatedControllers(bool shouldBeConsumed)
+{
+	handler->setConsumeAutomatedControllers(shouldBeConsumed);
+}
+
+struct ScriptingObjects::ScriptBuilder::Wrapper
+{
+	API_METHOD_WRAPPER_4(ScriptBuilder, create);
+	API_METHOD_WRAPPER_2(ScriptBuilder, get);
+	API_METHOD_WRAPPER_1(ScriptBuilder, getExisting);
+	API_VOID_METHOD_WRAPPER_2(ScriptBuilder, setAttributes);
+	API_VOID_METHOD_WRAPPER_0(ScriptBuilder, clear);
+	API_VOID_METHOD_WRAPPER_0(ScriptBuilder, flush);
+	API_VOID_METHOD_WRAPPER_2(ScriptBuilder, connectToScript);
+};
+
+ScriptingObjects::ScriptBuilder::ScriptBuilder(ProcessorWithScriptingContent* p) :
+	ConstScriptingObject(p, 6)
+{
+	createdModules.add(getScriptProcessor()->getMainController_()->getMainSynthChain());
+
+	createJSONConstants();
+
+	ADD_API_METHOD_0(clear);
+	ADD_API_METHOD_4(create);
+	ADD_API_METHOD_2(get);
+	ADD_API_METHOD_1(getExisting);
+	ADD_API_METHOD_2(setAttributes);
+	ADD_API_METHOD_0(flush);
+	ADD_API_METHOD_2(connectToScript);
+}
+
+ScriptingObjects::ScriptBuilder::~ScriptBuilder()
+{
+	if (!flushed && !createdModules.isEmpty())
+	{
+		debugError(dynamic_cast<Processor*>(getScriptProcessor()), "forgot to flush() a Builder!");
+	}
+}
+
+template <typename T> void addScriptProcessorInterfaceID(var& ids)
+{
+	auto i = T::getClassName();
+	ids.getDynamicObject()->setProperty(i, i.toString());
+}
+
+void ScriptingObjects::ScriptBuilder::createJSONConstants()
+{
+	auto root = getScriptProcessor()->getMainController_()->getMainSynthChain();
+
+	auto createObjectForFactory = [](hise::FactoryType* f)
+	{
+		DynamicObject::Ptr p = new DynamicObject();
+
+		f->setConstrainer(nullptr);
+
+		for (auto& t : f->getAllowedTypes())
+			p->setProperty(Identifier(t.type.toString().removeCharacters(" ")), t.type.toString());
+
+		return var(p.get());
+	};
+
+	{
+		MidiProcessorFactoryType f(root);
+		addConstant("MidiProcessors", createObjectForFactory(&f));
+	}
+
+	{
+		ModulatorChainFactoryType f(NUM_POLYPHONIC_VOICES, Modulation::GainMode, root);
+		addConstant("Modulators", createObjectForFactory(&f));
+	}
+
+	{
+		ModulatorSynthChainFactoryType m(NUM_POLYPHONIC_VOICES, root);
+		addConstant("SoundGenerators", createObjectForFactory(&m));
+	}
+
+	{
+		EffectProcessorChainFactoryType e(NUM_POLYPHONIC_VOICES, root);
+		addConstant("Effects", createObjectForFactory(&e));
+	}
+	{
+		var s(new DynamicObject());
+
+		addScriptProcessorInterfaceID<ScriptingMidiProcessor>(s);
+		addScriptProcessorInterfaceID<ScriptingModulator>(s);
+		addScriptProcessorInterfaceID<ScriptingSynth>(s);
+		addScriptProcessorInterfaceID<ScriptingEffect>(s);
+		addScriptProcessorInterfaceID<ScriptingAudioSampleProcessor>(s);
+		addScriptProcessorInterfaceID<ScriptSliderPackProcessor>(s);
+		addScriptProcessorInterfaceID<ScriptingTableProcessor>(s);
+		addScriptProcessorInterfaceID<ScriptingApi::Sampler>(s);
+		addScriptProcessorInterfaceID<ScriptedMidiPlayer>(s);
+		addScriptProcessorInterfaceID<ScriptRoutingMatrix>(s);
+		addScriptProcessorInterfaceID<ScriptingSlotFX>(s);
+
+		addConstant("InterfaceTypes", s);
+	}
+	{
+		var chainIds(new DynamicObject());
+
+		chainIds.getDynamicObject()->setProperty("Direct", raw::IDs::Chains::Direct);
+		chainIds.getDynamicObject()->setProperty("Midi", raw::IDs::Chains::Midi);
+		chainIds.getDynamicObject()->setProperty("Gain", raw::IDs::Chains::Gain);
+		chainIds.getDynamicObject()->setProperty("Pitch", raw::IDs::Chains::Pitch);
+		chainIds.getDynamicObject()->setProperty("FX", raw::IDs::Chains::FX);
+		chainIds.getDynamicObject()->setProperty("GlobalMod", raw::IDs::Chains::GlobalModulatorSlot);
+
+		addConstant("ChainIndexes", chainIds);
+	}
+}
+
+int ScriptingObjects::ScriptBuilder::create(var type, var id, int rootBuildIndex, int chainIndex)
+{
+	if (!getScriptProcessor()->getScriptingContent()->interfaceCreationAllowed())
+	{
+		reportScriptError("You can't use this method after the onInit callback!");
+		RETURN_IF_NO_THROW(-1);
+	}
+	
+	if (auto p = createdModules[rootBuildIndex])
+	{
+		if (auto existing = ProcessorHelpers::getFirstProcessorWithName(p, id.toString()))
+		{
+			createdModules.add(existing);
+			return createdModules.size() - 1;
+		}
+
+		raw::Builder b(getScriptProcessor()->getMainController_());
+
+		Identifier t_(type.toString());
+
+		
+
+		auto newP = b.create(p, t_, chainIndex);
+
+		if (newP != nullptr)
+		{
+			newP->setId(id.toString(), dontSendNotification);
+			createdModules.add(newP);
+			
+			flushed = false;
+
+			return createdModules.size() - 1;
+		}
+		else
+			reportScriptError("Couldn't create module with ID " + t_.toString());
+	}
+	else
+	{
+		reportScriptError("Couldn't find parent module with index " + String(rootBuildIndex));
+	}
+
+	RETURN_IF_NO_THROW(-1);
+}
+
+bool ScriptingObjects::ScriptBuilder::connectToScript(int buildIndex, String relativePath)
+{
+	if (auto jp = dynamic_cast<JavascriptProcessor*>(createdModules[buildIndex].get()))
+	{
+		jp->setConnectedFile(relativePath, true);
+		return true;
+	}
+
+	return false;
+}
+
+juce::var ScriptingObjects::ScriptBuilder::get(int buildIndex, String interfaceType)
+{
+	if (auto p = createdModules[buildIndex])
+	{
+		Identifier id(interfaceType);
+
+#define RETURN_IF_MATCH(Type, PType) if(id == Type::getClassName() && dynamic_cast<PType*>(p.get()) != nullptr) return var(new Type(getScriptProcessor(), dynamic_cast<PType*>(p.get())));
+
+		RETURN_IF_MATCH(ScriptingMidiProcessor, hise::MidiProcessor);
+		RETURN_IF_MATCH(ScriptingModulator, hise::Modulator);
+		RETURN_IF_MATCH(ScriptingSynth, hise::ModulatorSynth);
+		RETURN_IF_MATCH(ScriptingEffect, hise::EffectProcessor);
+		RETURN_IF_MATCH(ScriptingAudioSampleProcessor, hise::Processor);
+		RETURN_IF_MATCH(ScriptSliderPackProcessor, snex::ExternalDataHolder);
+		RETURN_IF_MATCH(ScriptingTableProcessor, snex::ExternalDataHolder);
+		RETURN_IF_MATCH(ScriptingApi::Sampler, hise::ModulatorSampler);
+		RETURN_IF_MATCH(ScriptedMidiPlayer, hise::MidiPlayer);
+		RETURN_IF_MATCH(ScriptRoutingMatrix, hise::Processor);
+		RETURN_IF_MATCH(ScriptingSlotFX, hise::EffectProcessor);
+
+#undef RETURN_IF_MATCH
+
+	}
+	return var();
+}
+
+int ScriptingObjects::ScriptBuilder::getExisting(String processorId)
+{
+	for (auto p : createdModules)
+	{
+		if (p->getId() == processorId)
+			return createdModules.indexOf(p);
+	}
+
+	auto pToAdd = ProcessorHelpers::getFirstProcessorWithName(getScriptProcessor()->getMainController_()->getMainSynthChain(), processorId);
+
+	if (pToAdd == nullptr)
+	{
+		reportScriptError("Can't find processor with ID " + processorId);
+	}
+
+	createdModules.add(pToAdd);
+	return createdModules.size() - 1;
+}
+
+void ScriptingObjects::ScriptBuilder::setAttributes(int buildIndex, var attributeValues)
+{
+	if (auto p = createdModules[buildIndex])
+	{
+		Array<Identifier> attributeIds;
+
+		for (int i = 0; i < p->getNumParameters(); i++)
+			attributeIds.add(p->getIdentifierForParameterIndex(i));
+
+		if (auto obj = attributeValues.getDynamicObject())
+		{
+			for (const auto& a : obj->getProperties())
+			{
+				auto idx = attributeIds.indexOf(a.name);
+
+				if (idx == -1)
+				{
+					reportScriptError("Can't find attribute " + a.name);
+					break;
+				}
+				else
+				{
+					auto v = (float)a.value;
+					FloatSanitizers::sanitizeFloatNumber(v);
+
+					p->setAttribute(idx, v, dontSendNotification);
+				}
+			}
+
+			p->sendPooledChangeMessage();
+		}
+	}
+}
+
+void ScriptingObjects::ScriptBuilder::clear()
+{
+	if (getScriptProcessor()->getMainController_()->getKillStateHandler().getCurrentThread() == MainController::KillStateHandler::SampleLoadingThread)
+	{
+		debugToConsole(dynamic_cast<Processor*>(getScriptProcessor()), "skipping Builder.clear() on project load");
+		return;
+	}
+
+	auto thisAsP = dynamic_cast<Processor*>(getScriptProcessor());
+
+	raw::Builder b(getScriptProcessor()->getMainController_());
+
+	auto synthChain = getScriptProcessor()->getMainController_()->getMainSynthChain();
+	
+	for (int i = 0; i < synthChain->getNumChildProcessors(); i++)
+	{
+		if (i < ModulatorSynth::numInternalChains)
+		{
+			auto m = synthChain->getChildProcessor(i);
+
+			for (int j = 0; j < m->getNumChildProcessors(); j++)
+			{
+				auto cToRemove = m->getChildProcessor(j);
+
+				// please don't kill yourself.
+				if (cToRemove == thisAsP)
+					continue;
+
+				else
+				{
+					b.remove<Processor>(cToRemove);
+					j--;
+				}
+			}
+		}
+		else
+		{
+			b.remove<Processor>(synthChain->getChildProcessor(i--));
+		}
+	}
+
+	flushed = false;
+}
+
+
+
+void ScriptingObjects::ScriptBuilder::flush()
+{
+	flushed = true;
+
+	auto synthChain = getScriptProcessor()->getMainController_()->getMainSynthChain();
+
+	synthChain->sendRebuildMessage(true);
+
+	getScriptProcessor()->getMainController_()->getProcessorChangeHandler().sendProcessorChangeMessage(synthChain, MainController::ProcessorChangeHandler::EventType::RebuildModuleList, false);
+}
+
+struct ScriptingObjects::ScriptErrorHandler::Wrapper
+{
+	API_VOID_METHOD_WRAPPER_1(ScriptErrorHandler, setErrorCallback);
+	API_VOID_METHOD_WRAPPER_2(ScriptErrorHandler, setCustomMessageToShow);
+	API_VOID_METHOD_WRAPPER_1(ScriptErrorHandler, clearErrorLevel);
+	API_VOID_METHOD_WRAPPER_0(ScriptErrorHandler, clearAllErrors);
+	API_METHOD_WRAPPER_0(ScriptErrorHandler, getErrorMessage);
+	API_METHOD_WRAPPER_0(ScriptErrorHandler, getNumActiveErrors);
+	API_METHOD_WRAPPER_0(ScriptErrorHandler, getCurrentErrorLevel);
+	API_VOID_METHOD_WRAPPER_1(ScriptErrorHandler, simulateErrorEvent);
+};
+
+ScriptingObjects::ScriptErrorHandler::ScriptErrorHandler(ProcessorWithScriptingContent* p) :
+	ConstScriptingObject(p, OverlayMessageBroadcaster::State::numReasons),
+	callback(p, this, var(), 2)
+{
+	addConstant("AppDataDirectoryNotFound", (int)OverlayMessageBroadcaster::AppDataDirectoryNotFound);
+	addConstant("LicenseNotFound", (int)OverlayMessageBroadcaster::LicenseNotFound);
+	addConstant("ProductNotMatching", (int)OverlayMessageBroadcaster::ProductNotMatching);
+	addConstant("UserNameNotMatching", (int)OverlayMessageBroadcaster::UserNameNotMatching);
+	addConstant("EmailNotMatching", (int)OverlayMessageBroadcaster::EmailNotMatching);
+	addConstant("MachineNumbersNotMatching", (int)OverlayMessageBroadcaster::MachineNumbersNotMatching);
+	addConstant("LicenseExpired", (int)OverlayMessageBroadcaster::LicenseExpired);
+	addConstant("LicenseInvalid", (int)OverlayMessageBroadcaster::LicenseInvalid);
+	addConstant("CriticalCustomErrorMessage", (int)OverlayMessageBroadcaster::CriticalCustomErrorMessage);
+	addConstant("SamplesNotInstalled", (int)OverlayMessageBroadcaster::SamplesNotInstalled);
+	addConstant("SamplesNotFound", (int)OverlayMessageBroadcaster::SamplesNotFound);
+	addConstant("IllegalBufferSize", (int)OverlayMessageBroadcaster::IllegalBufferSize);
+	addConstant("CustomErrorMessage", (int)OverlayMessageBroadcaster::CustomErrorMessage);
+	addConstant("CustomInformation", (int)OverlayMessageBroadcaster::CustomInformation);
+
+	p->getMainController_()->addOverlayListener(this);
+
+	// Deactivate the default overlay if you create this object.
+	p->getMainController_()->setUseDefaultOverlay(false);
+
+	ADD_API_METHOD_1(setErrorCallback);
+	ADD_API_METHOD_2(setCustomMessageToShow);
+	ADD_API_METHOD_1(clearErrorLevel);
+	ADD_API_METHOD_0(clearAllErrors);
+	ADD_API_METHOD_0(getErrorMessage);
+	ADD_API_METHOD_0(getNumActiveErrors);
+	ADD_API_METHOD_0(getCurrentErrorLevel);
+	ADD_API_METHOD_1(simulateErrorEvent);
+
+	for (int i = 0; i < OverlayMessageBroadcaster::State::numReasons; i++)
+		customErrorMessages.add({});
+}
+
+void ScriptingObjects::ScriptErrorHandler::overlayMessageSent(int state, const String& message)
+{
+	errorStates.setBit(state, true);
+
+	if (state == OverlayMessageBroadcaster::CustomErrorMessage ||
+		state == OverlayMessageBroadcaster::CustomInformation ||
+		state == OverlayMessageBroadcaster::CriticalCustomErrorMessage)
+	{
+		customErrorMessages.set(state, message);
+	}
+
+	sendErrorForHighestState();
+}
+
+void ScriptingObjects::ScriptErrorHandler::setErrorCallback(var errorCallback)
+{
+	if (HiseJavascriptEngine::isJavascriptFunction(errorCallback))
+	{
+		callback = WeakCallbackHolder(getScriptProcessor(), this, errorCallback, 2);
+		callback.incRefCount();
+		callback.addAsSource(this, "onErrorCallback");
+		callback.setThisObject(this);
+		callback.setHighPriority();
+	}
+}
+
+void ScriptingObjects::ScriptErrorHandler::setCustomMessageToShow(int state, String messageToShow)
+{
+	customErrorMessages.set(state, messageToShow);
+}
+
+void ScriptingObjects::ScriptErrorHandler::clearErrorLevel(int stateToClear)
+{
+	errorStates.clearBit(stateToClear);
+
+	if (!errorStates.isZero())
+	{
+		sendErrorForHighestState();
+	}
+}
+
+void ScriptingObjects::ScriptErrorHandler::clearAllErrors()
+{
+	errorStates.clear();
+}
+
+String ScriptingObjects::ScriptErrorHandler::getErrorMessage() const
+{
+	auto el = getCurrentErrorLevel();
+
+	if (el == -1)
+		return {};
+
+	auto m = customErrorMessages[el];
+
+	if (m.isNotEmpty())
+		return m;
+
+	return getScriptProcessor()->getMainController_()->getOverlayTextMessage((OverlayMessageBroadcaster::State)el);
+}
+
+int ScriptingObjects::ScriptErrorHandler::getNumActiveErrors() const
+{
+	return errorStates.countNumberOfSetBits();
+}
+
+int ScriptingObjects::ScriptErrorHandler::getCurrentErrorLevel() const
+{
+	if (errorStates.isZero())
+		return -1;
+
+	for (int i = 0; i < errorStates.getHighestBit() + 1; i++)
+	{
+		if (errorStates[i])
+			return i;
+	}
+
+	jassertfalse;
+	return -1;
+}
+
+void ScriptingObjects::ScriptErrorHandler::simulateErrorEvent(int state)
+{
+	getScriptProcessor()->getMainController_()->sendOverlayMessage(state);
+}
+
+void ScriptingObjects::ScriptErrorHandler::sendErrorForHighestState()
+{
+	if (callback)
+	{
+		args[0] = getCurrentErrorLevel();
+		args[1] = getErrorMessage();
+		callback.call(args, 2);
+	}
+}
+
+ScriptingObjects::ScriptErrorHandler::~ScriptErrorHandler()
+{
+	getScriptProcessor()->getMainController_()->removeOverlayListener(this);
+}
+
+
+
+
+
+
 
 } // namespace hise

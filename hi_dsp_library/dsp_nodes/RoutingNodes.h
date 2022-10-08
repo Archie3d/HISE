@@ -61,7 +61,7 @@ namespace cable
 {
 
 /** A cable type for usage in a frame-processing context. */
-template <int C, int AddToSignal=1> struct frame
+template <int C> struct frame
 {
 	using FrameType = span<float, C>;
 	using BlockType = ProcessData<C>;
@@ -69,7 +69,6 @@ template <int C, int AddToSignal=1> struct frame
 	Colour colour = Colours::transparentBlack;
 
 	constexpr int  getNumChannels() const { return C; };
-	constexpr bool addToSignal() const { return AddToSignal != 0; };
 	static constexpr bool allowFrame() { return true; };
 	static constexpr bool allowBlock() { return false; };
 
@@ -118,7 +117,82 @@ template <int C, int AddToSignal=1> struct frame
 };
 
 
-template <int C, int AddToSignal=1> struct block
+template <int NumChannels> struct block_base
+{
+	template <typename PD> void readIntoBuffer(PD& data, float feedback)
+	{
+		int numTotal = data.getNumSamples();
+		const int readBufferSize = channels[0].size();
+		int numToDo = numTotal;
+		int writePos = 0;
+		
+		while (numToDo > 0)
+		{
+			int index = 0;
+			int numThisTime = jmin(numToDo, readBufferSize - readIndex);
+
+			for (auto& ch : data)
+			{
+				jassert(isPositiveAndBelow(readIndex + numThisTime, readBufferSize + 1));
+				auto src = channels[index++].begin() + readIndex;
+				auto dst = ch.getRawWritePointer() + writePos;
+
+				FloatVectorOperations::addWithMultiply(dst, src, feedback, numThisTime);
+			}
+			
+			incCounter(true, numThisTime);
+            numToDo -= numThisTime;
+			writePos += numThisTime;
+		}
+	}
+
+	template <typename PD> void writeToBuffer(PD& data)
+	{
+		int numTotal = data.getNumSamples();
+		const int writeBufferSize = channels[0].size();
+		int numToDo = numTotal;
+		int readPos = 0;
+
+		while (numToDo > 0)
+		{
+			int index = 0;
+			int numThisTime = jmin(numToDo, writeBufferSize - writeIndex);
+
+			for (auto c : data)
+			{
+				jassert(isPositiveAndBelow(writeIndex + numThisTime, writeBufferSize + 1));
+				auto src = c.getRawWritePointer() + readPos;
+				auto dst = channels[index++].begin() + writeIndex;
+				
+				FloatVectorOperations::copy(dst, src, numThisTime);
+			}
+
+			incCounter(false, numThisTime);
+			numToDo -= numThisTime;
+			readPos += numThisTime;
+		}
+	}
+
+protected:
+
+	span<dyn<float>, NumChannels> channels;
+
+private:
+
+	void incCounter(bool incReadCounter, int delta)
+	{
+		auto& counter = incReadCounter ? readIndex : writeIndex;
+		counter += delta;
+
+		if (counter == channels[0].size())
+			counter = 0;
+	}
+
+	int writeIndex = 0;
+	int readIndex = 0;
+};
+
+template <int C> struct block: public block_base<C>
 {
 	using FrameType = span<float, C>;
 	using BlockType = ProcessData<C>;
@@ -126,7 +200,6 @@ template <int C, int AddToSignal=1> struct block
 	Colour colour = Colours::transparentBlack;
 
 	constexpr int  getNumChannels() const { return C; };
-	constexpr bool addToSignal() const { return AddToSignal != 0; };
 
 	static constexpr bool allowFrame() { return false; };
 	static constexpr bool allowBlock() { return true; };
@@ -147,10 +220,12 @@ template <int C, int AddToSignal=1> struct block
 
 		int index = 0;
 
-		auto d = ProcessDataHelpers<C>::makeChannelData(buffer);
+		auto d = ProcessDataHelpers<C>::makeChannelData(buffer, ps.blockSize);
 
+        auto& c = this->channels;
+        
 		for (auto& ch : d)
-			channels[index++].referToRawData(ch, (size_t)ps.blockSize);
+			c[index++].referToRawData(ch, ps.blockSize);
 	};
 
 	template <typename T> void connect(T& receiveTarget)
@@ -160,7 +235,7 @@ template <int C, int AddToSignal=1> struct block
 
 	void reset()
 	{
-		for (auto& d : channels)
+		for (auto& d : this->channels)
 			hmath::vset(d, 0.0f);
 	}
 
@@ -170,36 +245,12 @@ template <int C, int AddToSignal=1> struct block
 		jassertfalse;
 	}
 
-	void incCounter(bool incReadCounter, int delta)
-	{
-		auto& counter = incReadCounter ? readIndex : writeIndex;
-
-		counter += delta;
-
-		if (counter == channels[0].size())
-			counter = 0;
-	}
-
 	void process(BlockType& data)
 	{
-		int numThisTime = data.getNumSamples();
-
-		int index = 0;
-		for (auto c : data)
-		{
-			auto src = c.getRawWritePointer();
-			auto dst = channels[index++].begin() + writeIndex;
-
-			FloatVectorOperations::copy(dst, src, numThisTime);
-		}
-
-		incCounter(false, numThisTime);
+		this->writeToBuffer(data);
 	};
 
 	heap<float> buffer;
-	span<dyn<float>, C> channels;
-	int writeIndex = 0;
-	int readIndex = 0;
 };
 
 }
@@ -221,15 +272,15 @@ struct public_mod_target
 
 struct public_mod
 {
-	SET_HISE_NODE_ID("public_mod");
+	SN_NODE_ID("public_mod");
 	SN_GET_SELF_AS_OBJECT(public_mod);
 	SN_DESCRIPTION("Creates a modulation signal slot in the compiled node / nested network");
 
-	HISE_EMPTY_INITIALISE;
-	HISE_EMPTY_PROCESS;
-	HISE_EMPTY_PROCESS_SINGLE;
-	HISE_EMPTY_HANDLE_EVENT;
-	HISE_EMPTY_RESET;
+	SN_EMPTY_INITIALISE;
+	SN_EMPTY_PROCESS;
+	SN_EMPTY_PROCESS_FRAME;
+	SN_EMPTY_HANDLE_EVENT;
+	SN_EMPTY_RESET;
 
 	void prepare(PrepareSpecs ps)
 	{
@@ -251,7 +302,7 @@ struct public_mod
 		if (ptr != nullptr)
 			ptr->setModValueIfChanged(v);
 	}
-	FORWARD_PARAMETER_TO_MEMBER(public_mod);
+	SN_FORWARD_PARAMETER_TO_MEMBER(public_mod);
 
 	void connect(public_mod_target& obj)
 	{
@@ -284,7 +335,7 @@ struct base
 
 template <typename CableType> struct receive: public base
 {
-	SET_HISE_NODE_ID("receive");
+	SN_NODE_ID("receive");
 
 	SN_GET_SELF_AS_OBJECT(receive);
 	SN_DESCRIPTION("A signal target for a send node with adjustable feedback");
@@ -313,7 +364,7 @@ template <typename CableType> struct receive: public base
 		t->template setParameter<P>(value);
 	}
 
-	HISE_EMPTY_RESET;
+	SN_EMPTY_RESET;
 
 	bool isConnected() const
 	{
@@ -348,27 +399,7 @@ template <typename CableType> struct receive: public base
 		if (CableType::allowBlock())
 		{
 			if (auto srcPointer = source->buffer.begin())
-			{
-				int numToReadThisTime = data.getNumSamples();
-
-				int i = 0;
-
-				
-
-				for (auto& ch : data)
-				{
-					jassert(isPositiveAndBelow(numToReadThisTime-1, source->channels[i].size()));
-					
-					auto src = source->channels[i++].begin() + source->readIndex;
-
-					if (source->addToSignal())
-						FloatVectorOperations::addWithMultiply(ch.getRawWritePointer(), src, feedback, data.getNumSamples());
-					else
-						FloatVectorOperations::copy(ch.getRawWritePointer(), src, data.getNumSamples());
-				}
-
-				source->incCounter(true, numToReadThisTime);
-			}
+				source->readIntoBuffer(data, feedback);
 		}
 	}
 
@@ -378,20 +409,10 @@ template <typename CableType> struct receive: public base
 		{
 			jassert(data.size() <= source->frameData.size());
 
-			if (source->addToSignal())
-			{
-				int index = 0;
+			int index = 0;
 
-				for (auto& d : data)
-					d += source->frameData[index++] * feedback;
-			}
-			else
-			{
-				int index = 0;
-
-				for (auto& d : data)
-					d = source->frameData[index++] * feedback;
-			}
+			for (auto& d : data)
+				d += source->frameData[index++] * feedback;
 		}
 		else
 		{
@@ -441,7 +462,7 @@ template <typename CableType> struct receive: public base
 */
 template <typename CableType> struct send: public base
 {
-	SET_HISE_NODE_ID("send");
+	SN_NODE_ID("send");
 
 	SN_GET_SELF_AS_OBJECT(CableType);
 	SN_DESCRIPTION("Send the signal to one or more targets");
@@ -499,16 +520,16 @@ namespace routing
 
 struct ms_encode: public HiseDspBase
 {
-	SET_HISE_NODE_ID("ms_encode");
+	SN_NODE_ID("ms_encode");
 	SN_GET_SELF_AS_OBJECT(ms_encode);
 	SN_DESCRIPTION("A MS encoder (`L-R -> M-S`)");
 
-	HISE_EMPTY_RESET;
-	HISE_EMPTY_PREPARE;
-	HISE_EMPTY_CREATE_PARAM;
-	HISE_EMPTY_INITIALISE;
-	HISE_EMPTY_HANDLE_EVENT;
-	HISE_EMPTY_SET_PARAMETER;
+	SN_EMPTY_RESET;
+	SN_EMPTY_PREPARE;
+	SN_EMPTY_CREATE_PARAM;
+	SN_EMPTY_INITIALISE;
+	SN_EMPTY_HANDLE_EVENT;
+	SN_EMPTY_SET_PARAMETER;
 	
 	template <typename ProcessDataType> void process(ProcessDataType& data)
 	{
@@ -533,16 +554,16 @@ struct ms_encode: public HiseDspBase
 
 struct ms_decode: public HiseDspBase
 {
-	SET_HISE_NODE_ID("ms_decode");
+	SN_NODE_ID("ms_decode");
 	SN_GET_SELF_AS_OBJECT(ms_decode);
 	SN_DESCRIPTION("A MS decoder (`M-S -> L-R`)");
 
-	HISE_EMPTY_RESET;
-	HISE_EMPTY_PREPARE;
-	HISE_EMPTY_CREATE_PARAM;
-	HISE_EMPTY_INITIALISE;
-	HISE_EMPTY_HANDLE_EVENT;
-	HISE_EMPTY_SET_PARAMETER;
+	SN_EMPTY_RESET;
+	SN_EMPTY_PREPARE;
+	SN_EMPTY_CREATE_PARAM;
+	SN_EMPTY_INITIALISE;
+	SN_EMPTY_HANDLE_EVENT;
+	SN_EMPTY_SET_PARAMETER;
 
 	template <typename ProcessDataType> void process(ProcessDataType& data)
 	{
@@ -565,16 +586,84 @@ struct ms_decode: public HiseDspBase
 	}
 };
 
+struct matrix_helpers
+{
+	enum class SpecialType
+	{
+		NoSpecialType,
+		LeftToRight,
+		RightToLeft,
+		SwapChannels,
+		LeftOnly,
+		RightOnly,
+		numSpecialTypes
+	};
+
+	template <SpecialType Type> static void applySpecialType(ProcessData<2>& d)
+	{
+		static_assert(Type != SpecialType::NoSpecialType);
+
+		auto ptrs = d.getRawDataPointers();
+
+		switch (Type)
+		{
+		case SpecialType::LeftOnly:
+			FloatVectorOperations::clear(ptrs[1], d.getNumSamples());
+			break;
+		case SpecialType::RightOnly:
+			FloatVectorOperations::clear(ptrs[0], d.getNumSamples());
+			break;
+		case SpecialType::LeftToRight:
+			FloatVectorOperations::copy(ptrs[1], ptrs[0], d.getNumSamples());
+			FloatVectorOperations::clear(ptrs[0], d.getNumSamples());
+			break;
+		case SpecialType::RightToLeft:
+			FloatVectorOperations::copy(ptrs[0], ptrs[1], d.getNumSamples());
+			FloatVectorOperations::clear(ptrs[1], d.getNumSamples());
+			break;
+		case SpecialType::SwapChannels:
+		{
+			auto bf = (float*)alloca(sizeof(float) * d.getNumSamples());
+			FloatVectorOperations::copy(bf, ptrs[0], d.getNumSamples());
+			FloatVectorOperations::copy(ptrs[0], ptrs[1], d.getNumSamples());
+			FloatVectorOperations::copy(ptrs[1], bf, d.getNumSamples());
+			break;
+		}
+		}
+	}
+
+	template <typename MatrixType> static constexpr SpecialType getSpecialType()
+	{
+		if constexpr (MatrixType::getNumChannels() != 2 || MatrixType::hasSendChannels())
+			return SpecialType::NoSpecialType;
+
+		constexpr int l = MatrixType::getChannel(0);
+		constexpr int r = MatrixType::getChannel(1);
+
+		if constexpr (l == 0 && r == 0)
+			return SpecialType::RightToLeft;
+		else if constexpr (l == 1 && r == 1)
+			return SpecialType::LeftToRight;
+		else if constexpr (l == 0 && r == -1)
+			return SpecialType::LeftOnly;
+		else if constexpr (l == -1 && r == 1)
+			return SpecialType::RightOnly;
+		else if constexpr (l == 1 && r == 0)
+			return SpecialType::SwapChannels;
+
+		return SpecialType::NoSpecialType;
+	}
+};
 
 template <class MatrixType> struct matrix
 {
-	SET_HISE_NODE_ID("matrix");
+	SN_NODE_ID("matrix");
 
 	SN_GET_SELF_AS_OBJECT(matrix);
 	SN_DESCRIPTION("A dynamic routing matrix for any arbitrary channel routing");
 
-	HISE_EMPTY_RESET;
-	HISE_EMPTY_SET_PARAMETER;
+	SN_EMPTY_RESET;
+	SN_EMPTY_SET_PARAMETER;
 
 	void prepare(PrepareSpecs specs)
 	{
@@ -590,15 +679,22 @@ template <class MatrixType> struct matrix
 
 	template <typename ProcessDataType> void process(ProcessDataType& data)
 	{
-		if (MatrixType::isFixedChannelMatrix())
-			FrameConverters::processFix<MatrixType::getNumChannels()>(this, data);
+		if constexpr (MatrixType::isFixedChannelMatrix())
+		{
+			constexpr auto SType = matrix_helpers::getSpecialType<MatrixType>();
+
+			if constexpr (SType != matrix_helpers::SpecialType::NoSpecialType)
+				matrix_helpers::applySpecialType<SType>(data);
+			else
+				FrameConverters::processFix<MatrixType::getNumChannels()>(this, data);
+		}
 		else
 			FrameConverters::forwardToFrame16(this, data);
 	}
 	
 	template <typename FrameDataType> void processFrame(FrameDataType& data)
 	{
-		if (MatrixType::isFixedChannelMatrix())
+		if constexpr (MatrixType::isFixedChannelMatrix())
 		{
 			auto& fd = span<float, MatrixType::getNumChannels()>::as(data.begin());
 			processMatrixFrame(fd);
@@ -630,10 +726,13 @@ template <class MatrixType> struct matrix
 			if (index != -1)
 				data[index] += chData[i];
 
-			auto sendIndex = m.getSendChannel(i);
+			if constexpr (MatrixType::hasSendChannels())
+			{
+				auto sendIndex = m.getSendChannel(i);
 
-			if (sendIndex != -1)
-				data[sendIndex] += chData[i];
+				if (sendIndex != -1)
+					data[sendIndex] += chData[i];
+			}
 		}
 	}
 
@@ -647,6 +746,30 @@ template <class MatrixType> struct matrix
 	MatrixType m;
 
 	JUCE_DECLARE_WEAK_REFERENCEABLE(matrix);
+};
+
+
+
+template <int N, typename SubType, bool HasSendChannels> struct static_matrix
+{
+	virtual ~static_matrix() {};
+	static constexpr bool isFixedChannelMatrix() { return true; }
+	static constexpr bool hasSendChannels() { return HasSendChannels; }
+
+	static constexpr int getChannel(int index) { return SubType::channels[index]; }
+
+	static constexpr int getSendChannel(int index)
+	{ 
+		if constexpr(hasSendChannels())
+			return SubType::sendChannels[index]; 
+		else
+			return -1;
+	}
+
+	SN_EMPTY_INITIALISE;
+	SN_EMPTY_PREPARE;
+
+	static constexpr int getNumChannels() { return N; }
 };
 
 }

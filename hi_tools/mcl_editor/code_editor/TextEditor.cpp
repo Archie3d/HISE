@@ -148,6 +148,8 @@ int TextEditor::getNumDisplayedRows() const
 	return roundToInt((float)getHeight() / viewScaleFactor / document.getRowHeight());
 }
 
+
+
 bool TextEditor::shouldSkipInactiveUpdate() const
 {
 	auto docHasMultipleEditors = document.getCodeDocument().getNumListeners() > 10;
@@ -389,10 +391,50 @@ void TextEditor::closeAutocomplete(bool async, const String& textToInsert, Array
 
 			if (textToInsert.isNotEmpty())
 			{
+                auto textWithoutScope = textToInsert;
+                Array<Range<int>> rangesWithScope = selectRanges;
+                
+                auto lr = document.getFoldableLineRangeHolder();
+                if(auto n = lr.getRangeContainingLine(autocompleteSelection.head.x))
+                {
+                    auto scopeId = n->getBookmark().name.replace("namespace ", "").upToFirstOccurrenceOf("(", false, false) + ".";
+                    
+                    if(textToInsert.startsWith(scopeId))
+                    {
+                        textWithoutScope = textToInsert.fromFirstOccurrenceOf(scopeId, false, false);
+                        
+                        auto lengthToSubtract = scopeId.length();
+                        
+                        rangesWithScope.clear();
+                        
+                        for(auto& sr: selectRanges)
+                            rangesWithScope.add(sr - (int)lengthToSubtract);
+                    }
+                }
+                
+                if(textWithoutScope.contains("\n"))
+                {
+                    // Intend
+                    auto start = autocompleteSelection.head;
+                    auto end = autocompleteSelection.head;
+                    document.navigate(start, TextDocument::Target::line, TextDocument::Direction::backwardCol);
+                    document.navigate(end, TextDocument::Target::firstnonwhitespace, TextDocument::Direction::backwardCol);
+
+                    Selection emptyBeforeText(end, start);
+
+                    auto ws = document.getSelectionContent(emptyBeforeText);
+                    
+                    if(ws.isNotEmpty())
+                    {
+                        rangesWithScope.clear();
+                        textWithoutScope = textWithoutScope.replace("\n", "\n" + ws);
+                    }
+                }
+                
 				ScopedValueSetter<bool> svs(skipTextUpdate, true);
 				document.setSelections({ autocompleteSelection }, false);
 
-				insert(textToInsert);
+				insert(textWithoutScope);
 
 				auto s = document.getSelection(0).oriented();
 				CodeDocument::Position insertStart(document.getCodeDocument(), s.tail.x, s.tail.y);
@@ -404,7 +446,7 @@ void TextEditor::closeAutocomplete(bool async, const String& textToInsert, Array
 				updateViewTransform();
 				translateView(0.0f, 0.0f);
 
-				auto l = textToInsert.length();
+				auto l = textWithoutScope.length();
 
 				if (currentParameterSelection.size() == 0)
 					setParameterSelectionInternal(currentParameterSelection, nullptr, true);
@@ -413,11 +455,11 @@ void TextEditor::closeAutocomplete(bool async, const String& textToInsert, Array
 				{
 					clearParameters(true);
 
-					if (!selectRanges.isEmpty())
+					if (!rangesWithScope.isEmpty())
 					{
 						Action::List newList;
 
-						for (auto sr : selectRanges)
+						for (auto sr : rangesWithScope)
 						{
 							auto copy = insertStart;
 
@@ -506,7 +548,19 @@ bool TextEditor::copy()
         }
     }
     
-	SystemClipboard::copyTextToClipboard(document.getSelectionContent(document.getSelections().getFirst()));
+	auto s = document.getSelections().getFirst();
+	
+	if (s.isSingular())
+	{
+		// expand to whole line
+		document.navigate(s.head, TextDocument::Target::line, TextDocument::Direction::backwardCol);
+		document.navigate(s.head, TextDocument::Target::character, TextDocument::Direction::backwardCol);
+		document.navigate(s.tail, TextDocument::Target::line, TextDocument::Direction::forwardCol);
+	}
+
+	auto content = document.getSelectionContent(s);
+
+	SystemClipboard::copyTextToClipboard(content);
 	return true;
 }
 
@@ -921,6 +975,9 @@ void mcl::TextEditor::paintOverChildren (Graphics& g)
 
 void mcl::TextEditor::mouseDown (const MouseEvent& e)
 {
+	if (e.mods.isX1ButtonDown() || e.mods.isX2ButtonDown())
+		return;
+
     tokenSelection.clear();
     
 	if (readOnly)
@@ -1141,6 +1198,15 @@ void mcl::TextEditor::mouseDrag (const MouseEvent& e)
 	if (readOnly)
 		return;
 
+	if (e.mods.isX1ButtonDown())
+		return;
+
+	if (e.mods.isX2ButtonDown())
+		return;
+
+	if (e.mods.isMiddleButtonDown())
+		return;
+
     if (e.mouseWasDraggedSinceMouseDown())
     {
 		if (e.mods.isAltDown())
@@ -1177,6 +1243,9 @@ void mcl::TextEditor::mouseDrag (const MouseEvent& e)
 
 void mcl::TextEditor::mouseDoubleClick (const MouseEvent& e)
 {
+	if (e.mods.isX1ButtonDown() || e.mods.isX2ButtonDown())
+		return;
+
 	if (readOnly)
 		return;
 
@@ -1297,6 +1366,26 @@ void mcl::TextEditor::mouseMagnify (const MouseEvent& e, float scaleFactor)
     scaleView (scaleFactor, e.position.y);
 }
 
+
+bool TextEditor::keyMatchesId(const KeyPress& k, const Identifier& id)
+{
+	return TopLevelWindowWithKeyMappings::matches(this, k, id);
+}
+
+void TextEditor::initKeyPresses(Component* root)
+{
+	String category = "Code Editor";
+
+	TopLevelWindowWithKeyMappings::addShortcut(root, category, TextEditorShortcuts::show_autocomplete, "Show Autocomplete", KeyPress(KeyPress::escapeKey));
+
+	TopLevelWindowWithKeyMappings::addShortcut(root, category, TextEditorShortcuts::goto_definition, "Goto definition", KeyPress(KeyPress::F12Key));
+
+	TopLevelWindowWithKeyMappings::addShortcut(root, category, TextEditorShortcuts::show_search, "Search in current file", 
+		KeyPress('f', ModifierKeys::ctrlModifier, 0));
+
+	TopLevelWindowWithKeyMappings::addShortcut(root, category, TextEditorShortcuts::select_token, "Select current token",
+		KeyPress('t', ModifierKeys::ctrlModifier, 0));
+}
 
 bool mcl::TextEditor::keyPressed (const KeyPress& key)
 {
@@ -1626,7 +1715,7 @@ bool mcl::TextEditor::keyPressed (const KeyPress& key)
 	};
 
     // =======================================================================================
-    if (key.isKeyCode (KeyPress::escapeKey))
+    if (keyMatchesId(key, TextEditorShortcuts::show_autocomplete))
     {
 		clearParameters();
 
@@ -1658,8 +1747,6 @@ bool mcl::TextEditor::keyPressed (const KeyPress& key)
 			{
 				document.setSelections(document.getSelections().getLast(), true);
 			}
-
-			
 		}
 			
         updateSelections();
@@ -1697,7 +1784,8 @@ bool mcl::TextEditor::keyPressed (const KeyPress& key)
 			return insert("");
 		}
 
-        if (key.isKeyCode (KeyPress::backspaceKey)) return (   expandBack (Target::commandTokenNav, Direction::backwardCol)
+        if (key.isKeyCode (KeyPress::backspaceKey) && !key.getModifiers().isAnyModifierKeyDown())
+            return (expandBack (Target::commandTokenNav, Direction::backwardCol)
                                                             && insert (""));
 
 		if (key == KeyPress('e', ModifierKeys::ctrlModifier, 0) ||
@@ -1737,7 +1825,7 @@ bool mcl::TextEditor::keyPressed (const KeyPress& key)
 
 		auto s = document.getSelections().getFirst();
 
-		if (!s.isSingular())
+		if (!s.isSingular() || key.getModifiers().isShiftDown())
 		{
 			CodeDocument::Position start(document.getCodeDocument(), s.head.x, s.head.y);
 			CodeDocument::Position end(document.getCodeDocument(), s.tail.x, s.tail.y);
@@ -1802,7 +1890,7 @@ bool mcl::TextEditor::keyPressed (const KeyPress& key)
 		}
 	}
 
-	if (key.isKeyCode(KeyPress::F12Key))
+	if (keyMatchesId(key, TextEditorShortcuts::goto_definition))
 	{
 		return gotoDefinition();
 
@@ -1828,8 +1916,14 @@ bool mcl::TextEditor::keyPressed (const KeyPress& key)
 
 
 
-	if (key.isKeyCode(KeyPress::backspaceKey)) return remove(Target::character, Direction::backwardCol);
-	if (key.isKeyCode(KeyPress::deleteKey))	   return remove(Target::character, Direction::forwardCol);
+	if (key.isKeyCode(KeyPress::backspaceKey) && !key.getModifiers().isAnyModifierKeyDown())
+        return remove(Target::character, Direction::backwardCol);
+	if (key.isKeyCode(KeyPress::deleteKey))
+	{
+		// Deactivate double delete when pressing del key
+		lastInsertWasDouble = false;
+		return remove(Target::character, Direction::forwardCol);
+	}
 
 #if JUCE_WINDOWS || JUCE_LINUX
     // Home/End: End / start of line
@@ -1847,14 +1941,6 @@ bool mcl::TextEditor::keyPressed (const KeyPress& key)
     if (key == KeyPress ('a', ModifierKeys::commandModifier, 0)) return expand (Target::document);
 	if (key == KeyPress('d', ModifierKeys::commandModifier, 0))  return addNextTokenToSelection();
     if (key == KeyPress ('l', ModifierKeys::commandModifier, 0)) return expand (Target::line);
-    if (key == KeyPress ('u', ModifierKeys::commandModifier, 0))
-    {
-        return document.viewUndoManager.undo();
-    }
-    if (key == KeyPress ('u', ModifierKeys::commandModifier | ModifierKeys::shiftModifier, 0))
-    {
-        return document.viewUndoManager.redo();
-    }
     if (key == KeyPress ('z', ModifierKeys::commandModifier, 0))
     {
         return document.getCodeDocument().getUndoManager().undo();
@@ -1863,7 +1949,7 @@ bool mcl::TextEditor::keyPressed (const KeyPress& key)
     {
         return document.getCodeDocument().getUndoManager().redo();
     }
-    if (key == KeyPress ('t', ModifierKeys::commandModifier, 0))
+    if (keyMatchesId(key, TextEditorShortcuts::select_token))
     {
         document.navigateSelections (TextDocument::Target::subword, TextDocument::Direction::backwardCol, Selection::Part::head);
         document.navigateSelections (TextDocument::Target::subword, TextDocument::Direction::forwardCol,  Selection::Part::tail);
@@ -1872,7 +1958,7 @@ bool mcl::TextEditor::keyPressed (const KeyPress& key)
         return true;
     }
     
-	if (key.isKeyCode(KeyPress::F4Key))
+	if ((key.getKeyCode() == 35) && key.getModifiers().isCommandDown()) // "Cmd + #"
 	{
 		auto isComment = [this](Selection s)
 		{
@@ -1937,7 +2023,7 @@ bool mcl::TextEditor::keyPressed (const KeyPress& key)
 		return copy();
 	if (key == KeyPress('v', ModifierKeys::commandModifier, 0))
 		return paste();
-	if (key == KeyPress('f', ModifierKeys::ctrlModifier, 0))
+	if (keyMatchesId(key, TextEditorShortcuts::show_search))
 	{
 		currentSearchBox = new SearchBoxComponent(document, transform.getScaleFactor());
 		addAndMakeVisible(currentSearchBox);

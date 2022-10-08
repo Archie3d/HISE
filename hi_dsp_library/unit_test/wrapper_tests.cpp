@@ -152,8 +152,8 @@ struct helper_nodes
 	{
 		DECLARE_NODE(dc);
 
-		HISE_EMPTY_PREPARE;
-		HISE_EMPTY_RESET;
+		SN_EMPTY_PREPARE;
+		SN_EMPTY_RESET;
 		
 		void handleHiseEvent(HiseEvent& e)
 		{
@@ -188,8 +188,8 @@ struct helper_nodes
 	{
 		DECLARE_NODE(event2dc);
 
-		HISE_EMPTY_PREPARE;
-		HISE_EMPTY_RESET;
+		SN_EMPTY_PREPARE;
+		SN_EMPTY_RESET;
 		
         template <int P> void setParameter(double v)
         {
@@ -307,7 +307,7 @@ struct WrapperTests : public UnitTest
 
 		node_test t;
 
-		using BypassNodeType = bypass::smoothed<helper_nodes::dc>;
+		using BypassNodeType = bypass::smoothed<20, helper_nodes::dc>;
 		
 		BypassNodeType obj;
 

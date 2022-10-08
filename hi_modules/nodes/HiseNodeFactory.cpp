@@ -58,6 +58,11 @@ struct granulator: public data::base
 	SNEX_NODE(granulator);
 	SN_DESCRIPTION("A granular synthesiser");
 
+	granulator()
+	{
+		cppgen::CustomNodeProperties::setPropertyForObject(*this, PropertyIds::UncompileableNode);
+	}
+
 	using AudioDataType = span<block, 2>;
 
 	using IndexType = index::lerp<index::unscaled<double, index::clamped<0>>>;
@@ -295,7 +300,12 @@ struct granulator: public data::base
 	template <typename ProcessDataType> void process(ProcessDataType& d)
 	{
 		if (!ed.isEmpty() && d.getNumChannels() == 2)
-			processFix(d.template as<ProcessData<2>>());
+		{
+			if (auto s = DataTryReadLock(ed))
+			{
+				processFix(d.template as<ProcessData<2>>());
+			}
+		}
 	}
 
 	void processFix(ProcessData<2>& d)
@@ -467,35 +477,35 @@ struct granulator: public data::base
 	{
 		{
 			parameter::data d("Position", { 0.0, 1.0 });
-			d.callback = parameter::inner<granulator, 0>(*this);
+			registerCallback<0>(d);
 			l.add(d);
 		}
 		{
 			parameter::data d("Pitch", { 0.5, 2.0 });
+			registerCallback<1>(d);
 			d.setSkewForCentre(1.0);
-			d.callback = parameter::inner<granulator, 1>(*this);
 			d.setDefaultValue(1.0);
 			l.add(d);
 		}
 		{
 			parameter::data d("GrainSize", { 20.0, 800.0 });
-			d.callback = parameter::inner<granulator, 2>(*this);
+			registerCallback<2>(d);
 			d.setDefaultValue(80.0);
 			l.add(d);
 		}
 		{
 			parameter::data d("Density", { 0.0, 1.0 });
-			d.callback = parameter::inner<granulator, 3>(*this);
+			registerCallback<3>(d);
 			l.add(d);
 		}
 		{
 			parameter::data d("Spread", { 0.0, 1.0 });
-			d.callback = parameter::inner<granulator, 4>(*this);
+			registerCallback<4>(d);
 			l.add(d);
 		}
 		{
 			parameter::data d("Detune", { 0.0, 1.0 });
-			d.callback = parameter::inner<granulator, 5>(*this);
+			registerCallback<5>(d);
 			l.add(d);
 		}
 	}
@@ -608,7 +618,7 @@ template <typename ParameterClass> struct xy :
 	public pimpl::parameter_node_base<ParameterClass>,
 	public pimpl::no_processing
 {
-	SET_HISE_NODE_ID("xy");
+	SN_NODE_ID("xy");
 	SN_GET_SELF_AS_OBJECT(xy);
 	SN_PARAMETER_NODE_CONSTRUCTOR(xy, ParameterClass);
 	
@@ -635,7 +645,7 @@ template <typename ParameterClass> struct xy :
 		DEF_PARAMETER(X, xy);
 		DEF_PARAMETER(Y, xy);
 	};
-	PARAMETER_MEMBER_FUNCTION;
+	SN_PARAMETER_MEMBER_FUNCTION;
 
 	void setX(double v)
 	{
@@ -670,11 +680,70 @@ template <typename ParameterClass> struct xy :
 	JUCE_DECLARE_WEAK_REFERENCEABLE(xy);
 };
 
+struct TransportDisplay : public juce::Component,
+						  public PooledUIUpdater::SimpleTimer
+{
+	TransportDisplay(PooledUIUpdater* updater) :
+		SimpleTimer(updater),
+		dragger(updater)
+	{
+		addAndMakeVisible(dragger);
+
+		setSize(128, 32);
+	};
+
+	void resized() override
+	{
+		auto b = getLocalBounds();
+
+		iconBounds = b.removeFromLeft(b.getHeight()).toFloat().reduced(4);
+
+		dragger.setBounds(b);
+		repaint();
+	}
+
+	void paint(Graphics& g) override
+	{
+		MidiPlayerBaseType::TransportPaths f;
+		auto p = f.createPath(isPlaying ? "Start" : "Stop");
+		f.scalePath(p, iconBounds);
+		g.setColour(Colours::white.withAlpha(0.8f));
+		g.fillPath(p);
+
+	}
+
+	bool isPlaying = false;
+
+	void timerCallback() override
+	{
+		if (auto c = findParentComponentOfClass<ControlledObject>())
+		{
+			hise::MainController* mc = c->getMainController();
+			auto shouldBePlaying = mc->getMasterClock().isPlaying();
+
+			if (isPlaying != shouldBePlaying)
+			{
+				isPlaying = shouldBePlaying;
+				repaint();
+			}
+		}
+	}
+
+	static Component* createExtraComponent(void* obj, PooledUIUpdater* updater)
+	{
+		return new TransportDisplay(updater);
+	}
+
+	ModulationSourceBaseComponent dragger;
+
+	Rectangle<float> iconBounds;
+};
+
 struct TempoDisplay : public ModulationSourceBaseComponent
 {
-	using ObjectType = tempo_sync;
+	using ObjectType = tempo_sync_base;
 
-	TempoDisplay(PooledUIUpdater* updater, tempo_sync* p_) :
+	TempoDisplay(PooledUIUpdater* updater, ObjectType* p_) :
 		ModulationSourceBaseComponent(updater),
 		p(p_)
 	{
@@ -693,7 +762,9 @@ struct TempoDisplay : public ModulationSourceBaseComponent
 		if (p == nullptr)
 			return;
 
-		auto thisValue = p->currentTempoMilliseconds;
+		auto td = p->getUIData();
+
+		auto thisValue = td.currentTempoMilliseconds;
 
 		if (thisValue != lastValue)
 		{
@@ -751,7 +822,7 @@ struct TempoDisplay : public ModulationSourceBaseComponent
 
 	uint32_t lastTime;
 
-	WeakReference<tempo_sync> p;
+	WeakReference<ObjectType> p;
 };
 
 struct resetter_editor: public ScriptnodeExtraComponent<control::resetter<parameter::dynamic_base_holder>>
@@ -994,7 +1065,7 @@ using gonio_display = data::ui::pimpl::editorT<data::dynamic::displaybuffer,
 
 struct SpecNode: public NodeBase
 {
-	SET_HISE_NODE_ID("specs");
+	SN_NODE_ID("specs");
 
 	struct Comp : public NodeComponent,
 				  public PooledUIUpdater::SimpleTimer
@@ -1059,7 +1130,9 @@ struct SpecNode: public NodeBase
 
 	SpecNode(DspNetwork* n, ValueTree v) :
 		NodeBase(n, v, 0)
-	{};
+	{
+		cppgen::CustomNodeProperties::setPropertyForObject(*this, PropertyIds::UncompileableNode);
+	};
 
 	static NodeBase* createNode(DspNetwork* n, ValueTree v)
 	{
@@ -1153,10 +1226,14 @@ namespace fx
 			span<float, 100> x;
 			
 			for (int i = 0; i < 100; i++)
-				x[i] = (float)i / 100.0f;
+				x[i] = (float)i / 100.0f - 50.0f;
 			
-			getBitcrushedValue(x, getParameter(0) / 2.5);
+            
+            
+			getBitcrushedValue(x, getParameter(0) / 2.5, getParameter(1));
 			
+            FloatSanitizers::sanitizeArray(x.begin(), x.size());
+            
 			p.startNewSubPath(0, 1.0f - x[0]);
 
 			for (int i = 1; i < 100; i++)
@@ -1297,10 +1374,10 @@ Factory::Factory(DspNetwork* network) :
 	NodeFactory(network)
 {
 	registerPolyNode<reverb, wrap::illegal_poly<reverb>, reverb_editor>();
-	registerPolyNode<sampleandhold, sampleandhold_poly, sampleandhold_editor>();
-	registerPolyNode<bitcrush, bitcrush_poly, bitcrush_editor>();
+	registerPolyNode<sampleandhold<1>, sampleandhold<NUM_POLYPHONIC_VOICES>, sampleandhold_editor>();
+	registerPolyNode<bitcrush<1>, bitcrush<NUM_POLYPHONIC_VOICES>, bitcrush_editor>();
 	registerPolyNode<wrap::fix<2, haas<1>>, wrap::fix<2, haas<NUM_POLYPHONIC_VOICES>>>();
-	registerPolyNode<phase_delay, phase_delay_poly, phase_delay_editor>();
+	registerPolyNode<phase_delay<1>, phase_delay<NUM_POLYPHONIC_VOICES>, phase_delay_editor>();
 }
 
 }
@@ -1348,8 +1425,11 @@ namespace control
 {
 	using dynamic_cable_table = wrap::data<control::cable_table<parameter::dynamic_base_holder>, data::dynamic::table>;
 	using dynamic_cable_pack = wrap::data<control::cable_pack<parameter::dynamic_base_holder>, data::dynamic::sliderpack>;
+    using dynamic_pack_resizer = wrap::data<control::pack_resizer, data::dynamic::sliderpack>;
 
 	template <int NV> using dynamic_smoother_parameter = control::smoothed_parameter<NV, smoothers::dynamic<NV>>;
+
+	template <int NV> using dynamic_smoother_parameter_unscaled = control::smoothed_parameter_unscaled<NV, smoothers::dynamic<NV>>;
 
  	Factory::Factory(DspNetwork* network) :
 		NodeFactory(network)
@@ -1357,18 +1437,31 @@ namespace control
 
 		registerPolyNoProcessNode<control::bipolar<1, parameter::dynamic_base_holder>, control::bipolar<NUM_POLYPHONIC_VOICES, parameter::dynamic_base_holder>, bipolar_editor>();
 
+		registerPolyNoProcessNode<control::intensity<1, parameter::dynamic_base_holder>, control::intensity<NUM_POLYPHONIC_VOICES, parameter::dynamic_base_holder>, intensity_editor>();
 
+		
 
-		registerPolyNoProcessNode<control::pma<1, parameter::dynamic_base_holder>, control::pma<NUM_POLYPHONIC_VOICES, parameter::dynamic_base_holder>, pma_editor>();
+		registerPolyNoProcessNode<control::pma<1, parameter::dynamic_base_holder>, control::pma<NUM_POLYPHONIC_VOICES, parameter::dynamic_base_holder>, pma_editor<multilogic::pma>>();
+		registerPolyNoProcessNode<control::pma_unscaled<1, parameter::dynamic_base_holder>, control::pma_unscaled<NUM_POLYPHONIC_VOICES, parameter::dynamic_base_holder>, pma_editor<multilogic::pma_unscaled>>();
 
 		registerPolyNoProcessNode<control::minmax<1, parameter::dynamic_base_holder>, control::minmax<NUM_POLYPHONIC_VOICES, parameter::dynamic_base_holder>, minmax_editor>();
 
 		registerPolyNoProcessNode<control::logic_op<1, parameter::dynamic_base_holder>, control::logic_op<NUM_POLYPHONIC_VOICES, parameter::dynamic_base_holder>, logic_op_editor>();
 
+		registerPolyNoProcessNode<control::bang<1, parameter::dynamic_base_holder>, control::bang<NUM_POLYPHONIC_VOICES, parameter::dynamic_base_holder>, ModulationSourceBaseComponent>();
+
+		
+
+		registerPolyNoProcessNode<control::change<1, parameter::dynamic_base_holder>, control::change<NUM_POLYPHONIC_VOICES, parameter::dynamic_base_holder>, ModulationSourceBaseComponent>();
+
+        registerNoProcessNode<dynamic_pack_resizer, data::ui::sliderpack_editor>();
+        
 		registerNoProcessNode<control::sliderbank_editor::NodeType, control::sliderbank_editor, false>();
 		registerNoProcessNode<dynamic_cable_pack, data::ui::sliderpack_editor>();
 		registerNoProcessNode<dynamic_cable_table, data::ui::table_editor>();
 		
+		registerNoProcessNode<control::normaliser<parameter::dynamic_base_holder>, ModulationSourceBaseComponent>();
+
 		registerNoProcessNode<control::input_toggle<parameter::dynamic_base_holder>, input_toggle_editor>();
 
         registerNoProcessNode<conversion_logic::dynamic::NodeType, conversion_logic::dynamic::editor>();
@@ -1380,6 +1473,8 @@ namespace control
 		registerNoProcessNode<control::resetter_editor::NodeType, control::resetter_editor>();
 		registerPolyModNode<dynamic_smoother_parameter<1>, dynamic_smoother_parameter<NUM_POLYPHONIC_VOICES>, smoothers::dynamic_base::editor>();
 
+		registerPolyModNode<dynamic_smoother_parameter_unscaled<1>, dynamic_smoother_parameter_unscaled<NUM_POLYPHONIC_VOICES>, smoothers::dynamic_base::editor>();
+
 #if HISE_INCLUDE_SNEX
 		registerNoProcessNode<dynamic_expression::ControlNodeType, dynamic_expression::editor>();
 		
@@ -1390,9 +1485,15 @@ namespace control
 
 		registerNoProcessNode<control::midi_cc<parameter::dynamic_base_holder>, midi_cc_editor>();
 
+		registerNoProcessNode<control::voice_bang<parameter::dynamic_base_holder>, ModulationSourceBaseComponent>();
+
 		registerNoProcessNode<file_analysers::dynamic::NodeType, file_analysers::dynamic::editor, false>(); //>();
 
-		registerModNode<tempo_sync, TempoDisplay>();
+		registerPolyModNode<tempo_sync<1>, tempo_sync<NUM_POLYPHONIC_VOICES>, TempoDisplay>();
+
+		registerPolyModNode<transport<1>, transport<NUM_POLYPHONIC_VOICES>, TransportDisplay>();
+
+		registerPolyModNode<ppq<1>, ppq<NUM_POLYPHONIC_VOICES>, TransportDisplay>();
 	}
 }
 
@@ -1678,7 +1779,7 @@ Factory::Factory(DspNetwork* network) :
 
 #if HISE_INCLUDE_SNEX
 	registerPolyNode<snex_osc<1, SnexOscillator>, snex_osc<NUM_POLYPHONIC_VOICES, SnexOscillator>, NewSnexOscillatorDisplay>();
-	registerNode<core::snex_node, core::snex_node::editor>();
+	registerModNode<core::snex_node, core::snex_node::editor>();
 	registerNode<waveshapers::dynamic::NodeType, waveshapers::dynamic::editor>();
 #endif
 
@@ -1688,6 +1789,8 @@ Factory::Factory(DspNetwork* network) :
 	
 	registerModNode<dp<peak>, data::ui::displaybuffer_editor>();
 	registerPolyModNode<dp<ramp<1, true>>, dp<ramp<NUM_POLYPHONIC_VOICES, true>>, data::ui::displaybuffer_editor>();
+
+	registerPolyModNode<dp<clock_ramp<1, true>>, dp<clock_ramp<NUM_POLYPHONIC_VOICES, true>>, data::ui::displaybuffer_editor>();
 
 	registerNode<core::mono2stereo>();
 
@@ -1762,15 +1865,15 @@ Factory::Factory(DspNetwork* n) :
 {
 	using namespace data::ui;
 
-	registerPolyNode<df<one_pole>,		df<one_pole_poly>,		filter_editor>();
-	registerPolyNode<df<svf>,			df<svf_poly>,			filter_editor>();
-	registerPolyNode<df<svf_eq>,		df<svf_eq_poly>,		filter_editor>();
-	registerPolyNode<df<biquad>,		df<biquad_poly>,		filter_editor>();
-	registerPolyNode<df<ladder>,		df<ladder_poly>,		filter_editor>();
-	registerPolyNode<df<ring_mod>,		df<ring_mod_poly>,		filter_editor>();
-	registerPolyNode<df<moog>,			df<moog_poly>,			filter_editor>();
-	registerPolyNode<df<allpass>,		df<allpass_poly>,		filter_editor>();
-	registerPolyNode<df<linkwitzriley>,	df<linkwitzriley_poly>, filter_editor>();
+	registerPolyNode<df<one_pole<1>>,		df<one_pole<NUM_POLYPHONIC_VOICES>>,	filter_editor>();
+	registerPolyNode<df<svf<1>>,			df<svf<NUM_POLYPHONIC_VOICES>>,			filter_editor>();
+	registerPolyNode<df<svf_eq<1>>,			df<svf_eq<NUM_POLYPHONIC_VOICES>>,		filter_editor>();
+	registerPolyNode<df<biquad<1>>,			df<biquad<NUM_POLYPHONIC_VOICES>>,		filter_editor>();
+	registerPolyNode<df<ladder<1>>,			df<ladder<NUM_POLYPHONIC_VOICES>>,		filter_editor>();
+	registerPolyNode<df<ring_mod<1>>,		df<ring_mod<NUM_POLYPHONIC_VOICES>>,	filter_editor>();
+	registerPolyNode<df<moog<1>>,			df<moog<NUM_POLYPHONIC_VOICES>>,		filter_editor>();
+	registerPolyNode<df<allpass<1>>,		df<allpass<NUM_POLYPHONIC_VOICES>>,		filter_editor>();
+	registerPolyNode<df<linkwitzriley<1>>,	df<linkwitzriley<NUM_POLYPHONIC_VOICES>>, filter_editor>();
 
 	registerNode<wrap::data<convolution, data::dynamic::audiofile>, data::ui::audiofile_editor>();
 	//registerPolyNode<fir, fir_poly>();

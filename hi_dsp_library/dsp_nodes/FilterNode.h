@@ -39,8 +39,12 @@ using namespace hise;
 namespace filters
 {
 
+
+
+
 template <class FilterType, int NV> 
-class FilterNodeBase : public data::base,
+class FilterNodeBase : public data::filter_base,
+					   public polyphonic_base,
 					   public hise::ComplexDataUIUpdaterBase::EventListener
 {
 public:
@@ -52,6 +56,7 @@ public:
 		Gain,
 		Smoothing,
 		Mode,
+		Enabled,
 		numParameters
 	};
 
@@ -59,13 +64,17 @@ public:
 
 	static constexpr int NumVoices = NV;
 
-	SET_HISE_POLY_NODE_ID(FilterType::getFilterTypeId());
+	SN_POLY_NODE_ID(FilterType::getFilterTypeId());
+
+	FilterNodeBase() :
+		polyphonic_base(getStaticId(), false)
+	{};
 
 	SN_GET_SELF_AS_OBJECT(FilterNodeBase);
 	SN_DESCRIPTION("A filter node");
 
-	HISE_EMPTY_HANDLE_EVENT;
-	HISE_EMPTY_INITIALISE;
+	SN_EMPTY_HANDLE_EVENT;
+	SN_EMPTY_INITIALISE;
 
 	void createParameters(ParameterDataList& parameters);
 	void prepare(PrepareSpecs ps);
@@ -78,7 +87,7 @@ public:
 
 		jassert(d.dataType == ExternalData::DataType::FilterCoefficients);
 
-		base::setExternalData(d, index);
+		filter_base::setExternalData(d, index);
 
 		if (auto fd = dynamic_cast<FilterDataObject*>(d.obj))
 		{
@@ -89,18 +98,25 @@ public:
 		}
 	}
 
+	IIRCoefficients getApproximateCoefficients() const override;
+
 	void onComplexDataEvent(hise::ComplexDataUIUpdaterBase::EventType e, var newValue) override;
 
 	template <typename ProcessDataType> void process(ProcessDataType& data)
 	{
-		auto b = data.toAudioSampleBuffer();
-		FilterHelpers::RenderData r(b, 0, data.getNumSamples());
-		filter.get().render(r);
+		if (enabled)
+		{
+			auto b = data.toAudioSampleBuffer();
+			FilterHelpers::RenderData r(b, 0, data.getNumSamples());
+			filter.get().render(r);
+		}
+		
 	}
 
 	template <typename FrameDataType> void processFrame(FrameDataType& data)
 	{
-		filter.get().processFrame(data.begin(), data.size());
+		if(enabled)
+			filter.get().processFrame(data.begin(), data.size());
 	}
 
 	void sendCoefficientUpdateMessage()
@@ -116,42 +132,52 @@ public:
 	void setQ(double newQ);
 	void setMode(double newMode);
 	void setSmoothing(double newSmoothingTime);
+	void setEnabled(double isEnabled);
 
 	DEFINE_PARAMETERS
 	{
 		DEF_PARAMETER(Frequency, FilterNodeBase);
 		DEF_PARAMETER(Gain, FilterNodeBase);
 		DEF_PARAMETER(Q, FilterNodeBase);
-		DEF_PARAMETER(Mode, FilterNodeBase);
 		DEF_PARAMETER(Smoothing, FilterNodeBase);
+		DEF_PARAMETER(Mode, FilterNodeBase);
+		DEF_PARAMETER(Enabled, FilterNodeBase);
 	}
-	PARAMETER_MEMBER_FUNCTION;
+	SN_PARAMETER_MEMBER_FUNCTION;
 	
 
 	PolyData<FilterObject, NumVoices> filter;
 	double sr = -1.0;
+	bool enabled = true;
 
 	JUCE_DECLARE_WEAK_REFERENCEABLE(FilterNodeBase);
 };
 
 
 
+
+
+
+#define DEFINE_FILTER_NODE_TEMPLATE2(fid, FilterType) template <int NV> using fid = FilterNodeBase<hise::MultiChannelFilter<FilterType>, NV>;
+
+#if 0
 #define DEFINE_FILTER_NODE_TEMPLATE(monoName, polyName, className) extern template class FilterNodeBase<className, 1>; \
 using monoName = FilterNodeBase<hise::MultiChannelFilter<className>, 1>; \
 extern template class FilterNodeBase<className, NUM_POLYPHONIC_VOICES>; \
 using polyName = FilterNodeBase<hise::MultiChannelFilter<className>, NUM_POLYPHONIC_VOICES>; 
+#endif
 
-DEFINE_FILTER_NODE_TEMPLATE(svf, svf_poly, StateVariableFilterSubType);
-DEFINE_FILTER_NODE_TEMPLATE(biquad, biquad_poly, StaticBiquadSubType);
-DEFINE_FILTER_NODE_TEMPLATE(one_pole, one_pole_poly, SimpleOnePoleSubType);
-DEFINE_FILTER_NODE_TEMPLATE(ring_mod, ring_mod_poly, RingmodFilterSubType);
-DEFINE_FILTER_NODE_TEMPLATE(allpass, allpass_poly, PhaseAllpassSubType);
-DEFINE_FILTER_NODE_TEMPLATE(ladder, ladder_poly, LadderSubType);
-DEFINE_FILTER_NODE_TEMPLATE(moog, moog_poly, MoogFilterSubType);
-DEFINE_FILTER_NODE_TEMPLATE(svf_eq, svf_eq_poly, StateVariableEqSubType);
-DEFINE_FILTER_NODE_TEMPLATE(linkwitzriley, linkwitzriley_poly, LinkwitzRiley);
+DEFINE_FILTER_NODE_TEMPLATE2(svf, StateVariableFilterSubType);
+DEFINE_FILTER_NODE_TEMPLATE2(biquad, StaticBiquadSubType);
+DEFINE_FILTER_NODE_TEMPLATE2(one_pole, SimpleOnePoleSubType);
+DEFINE_FILTER_NODE_TEMPLATE2(ring_mod, RingmodFilterSubType);
+DEFINE_FILTER_NODE_TEMPLATE2(allpass, PhaseAllpassSubType);
+DEFINE_FILTER_NODE_TEMPLATE2(ladder, LadderSubType);
+DEFINE_FILTER_NODE_TEMPLATE2(moog, MoogFilterSubType);
+DEFINE_FILTER_NODE_TEMPLATE2(svf_eq, StateVariableEqSubType);
+DEFINE_FILTER_NODE_TEMPLATE2(linkwitzriley, LinkwitzRiley);
 
-#undef DEFINE_FILTER_NODE_TEMPLATE
+#undef DEFINE_FILTER_NODE_TEMPLATE2
 
 #if 0
 template <int NV> struct fir_impl : public AudioFileNodeBase
@@ -161,11 +187,11 @@ template <int NV> struct fir_impl : public AudioFileNodeBase
 
 	static constexpr int NumVoices = NV;
 
-	SET_HISE_NODE_ID("fir");
+	SN_NODE_ID("fir");
 	SN_GET_SELF_AS_OBJECT(fir_impl);
 
-	HISE_EMPTY_SET_PARAMETER;
-	HISE_EMPTY_HANDLE_EVENT;
+	SN_EMPTY_SET_PARAMETER;
+	SN_EMPTY_HANDLE_EVENT;
 
 	fir_impl();;
 
@@ -241,7 +267,7 @@ template <int NV> struct fir_impl : public AudioFileNodeBase
 			f.reset();
 	}
 
-	HISE_EMPTY_MOD;
+	SN_EMPTY_MOD;
 
 	template <typename ProcessDataType> void process(ProcessDataType& d)
 	{

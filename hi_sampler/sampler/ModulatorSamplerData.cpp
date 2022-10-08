@@ -158,6 +158,24 @@ juce::String SampleMap::getMonolithID() const
 	return MonolithFileReference::getIdFromValueTree(data);
 }
 
+void SampleMap::updateCrossfades(Identifier id, var newValue)
+{
+	if (id == Identifier("CrossfadeGamma"))
+	{
+		auto gamma = (float)newValue;
+
+		ModulatorSampler::SoundIterator iter(getSampler(), true);
+
+		while (auto s = iter.getNextSound())
+		{
+			for (int i = 0; i < s->getNumMultiMicSamples(); i++)
+			{
+				s->getReferenceToSound(i)->setCrossfadeGammaValue(gamma);
+			}
+		}
+	}
+}
+
 hise::FileHandlerBase* SampleMap::getCurrentFileHandler() const
 {
 	FileHandlerBase* handler = &GET_PROJECT_HANDLER(sampler);
@@ -364,7 +382,7 @@ void SampleMap::parseValueTree(const ValueTree &v)
 #if USE_BACKEND
 		debugToConsole(sampler, s);
 #else
-		sampler->getMainController()->sendOverlayMessage(DeactiveOverlay::SamplesNotFound, {});
+		sampler->getMainController()->sendOverlayMessage(OverlayMessageBroadcaster::SamplesNotFound);
 #endif
 
 	}
@@ -379,6 +397,11 @@ void SampleMap::parseValueTree(const ValueTree &v)
 const ValueTree SampleMap::getValueTree() const
 {
 	return data;
+}
+
+float SampleMap::getCrossfadeGammaValue() const
+{
+	return (float)data["CrossfadeGamma"];
 }
 
 void SampleMap::poolEntryReloaded(PoolReference referenceThatWasChanged)
@@ -761,6 +784,11 @@ void SampleMap::setNewValueTree(const ValueTree& v)
 
 	data = v;
 	data.addListener(this);
+
+	if (!data.hasProperty("CrossfadeGamma"))
+		data.setProperty("CrossfadeGamma", 1.0, nullptr);
+
+	crossfadeListener.setCallback(data, Identifier("CrossfadeGamma"), valuetree::AsyncMode::Synchronously, BIND_MEMBER_FUNCTION_2(SampleMap::updateCrossfades));
 }
 
 void SampleMap::addSound(ValueTree& newSoundData)
@@ -884,15 +912,27 @@ void SampleMap::load(const PoolReference& reference)
 
 	currentPool = getSampler()->getMainController()->getCurrentSampleMapPool();
 
+	
+
 	if (!FullInstrumentExpansion::isEnabled(getSampler()->getMainController()))
 	{
 		if (auto expansion = getSampler()->getMainController()->getExpansionHandler().getExpansionForWildcardReference(reference.getReferenceString()))
 		{
 			currentPool = &expansion->pool->getSampleMapPool();
 		}
+
+		sampleMapData = currentPool->loadFromReference(reference, PoolHelpers::LoadAndCacheWeak);
+	}
+	else
+	{
+		// Remove the "{PROJECT_FOLDER}" wildcard or it won't find it in the pool...
+		auto ref = PoolReference(getSampler()->getMainController(), 
+							reference.getReferenceString().fromLastOccurrenceOf("{PROJECT_FOLDER}", false, false),
+							FileHandlerBase::SampleMaps);
+
+		sampleMapData = currentPool->loadFromReference(ref, PoolHelpers::LoadAndCacheWeak);
 	}
 
-	sampleMapData = currentPool->loadFromReference(reference, PoolHelpers::LoadAndCacheWeak);
 	currentPool->addListener(this);
 
 	if (sampleMapData)
@@ -1203,7 +1243,7 @@ juce::AudioFormatWriter* MonolithExporter::createWriter(hlac::HiseLosslessAudioF
 	return writer.release();
 }
 
-juce::uint32 MonolithExporter::getNumBytesForSplitSize() const
+int64 MonolithExporter::getNumBytesForSplitSize() const
 {
 	auto mb = getComboBoxComponent("splitsize")->getText().getIntValue();
 
@@ -1212,7 +1252,7 @@ juce::uint32 MonolithExporter::getNumBytesForSplitSize() const
 
 	auto sixtyMB = 1024 * 1024 * 60;
 
-	return mb * 1024 * 1024 - sixtyMB;
+	return (int64)(mb * 1024 * 1024 - sixtyMB);
 }
 
 void MonolithExporter::checkSanity()
@@ -1246,7 +1286,7 @@ juce::File MonolithExporter::getNextMonolith(const File& f) const
 	MonolithFileReference ref(f, numChannels, numMonolithSplitParts);
 
 	ref.bumpToNextMonolith(false);
-	return ref.getFile();
+	return ref.getFile(false);
 
 #if 0
 	auto p = f.getParentDirectory();
@@ -1306,7 +1346,7 @@ void MonolithExporter::writeFiles(int channelIndex, bool overwriteExistingData)
 	
 	Array<File> firstChannelMonolithFiles;
 
-	auto outputFile = monolithFileReference->getFile();
+	auto outputFile = monolithFileReference->getFile(false);
 
 	if (!outputFile.existsAsFile() || overwriteExistingData)
 	{
@@ -1336,7 +1376,7 @@ void MonolithExporter::writeFiles(int channelIndex, bool overwriteExistingData)
 			hWriter->preallocateMemory(numSamplesToWrite, numChannelsInSample);
 		}
 
-		uint32 numBytesWritten = 0;
+		int64 numBytesWritten = 0;
 
 		for (int i = 0; i < channelList->size(); i++)
 		{
@@ -1390,7 +1430,7 @@ void MonolithExporter::writeFiles(int channelIndex, bool overwriteExistingData)
 				}
 
 				monolithFileReference->bumpToNextMonolith(false);
-				outputFile = monolithFileReference->getFile();
+				outputFile = monolithFileReference->getFile(false);
 
 				if (outputFile.existsAsFile())
 					outputFile.deleteFile();
@@ -1423,7 +1463,7 @@ void MonolithExporter::writeFiles(int channelIndex, bool overwriteExistingData)
 			if (renameFirstMonolith)
 			{
 				auto actualFile = outputFile;
-				auto expectedFile = monolithFileReference->getFile();
+				auto expectedFile = monolithFileReference->getFile(false);
 
 				auto ok = expectedFile.deleteFile();
 				ok &= actualFile.moveFileTo(expectedFile);
@@ -1439,7 +1479,7 @@ void MonolithExporter::writeFiles(int channelIndex, bool overwriteExistingData)
 	}
 }
 
-bool MonolithExporter::shouldSplit(int channelIndex, int numBytesWritten, int sampleIndex) const
+bool MonolithExporter::shouldSplit(int channelIndex, int64 numBytesWritten, int sampleIndex) const
 {
 	if (channelIndex == 0)
 		return numBytesWritten > getNumBytesForSplitSize();
@@ -1505,7 +1545,7 @@ void MonolithExporter::updateSampleMap()
 					s.setProperty(SampleIds::SampleEnd, reader->lengthInSamples, nullptr);
 				}
 				
-				largestSample = jmax<int64>(largestSample, length);
+				largestSample = jmax<int64_t>(largestSample, length);
 
 				s.setProperty(MonolithIds::MonolithOffset, offset, nullptr);
 				s.setProperty(MonolithIds::MonolithLength, length, nullptr);
@@ -1557,6 +1597,10 @@ BatchReencoder::BatchReencoder(ModulatorSampler* s) :
 	if (GET_HISE_SETTING(s, HiseSettings::Project::SupportFullDynamicsHLAC))
 		getComboBoxComponent("normalise")->setSelectedItemIndex(2, dontSendNotification);
 
+    addComboBox("splitsize", { "1500 MB", "1700 MB", "2000 MB" }, "Split size");
+
+    getComboBoxComponent("splitsize")->setSelectedItemIndex(1, dontSendNotification);
+    
 	addProgressBarComponent(wholeProgress);
 
 	addBasicComponents(true);

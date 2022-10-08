@@ -44,6 +44,7 @@ PanelWithProcessorConnection::PanelWithProcessorConnection(FloatingTile* parent)
 
 	followWorkspaceButton.setToggleModeWithColourChange(true);
 	followWorkspaceButton.setTooltip("Enables updating the content when a workspace button is clicked in the patch browser");
+	followWorkspaceButton.setWantsKeyboardFocus(false);
 
 	connectionSelector->setColour(HiseColourScheme::ComponentFillTopColourId, Colours::transparentBlack);
 	connectionSelector->setColour(HiseColourScheme::ComponentFillBottomColourId, Colours::transparentBlack);
@@ -61,6 +62,9 @@ PanelWithProcessorConnection::PanelWithProcessorConnection(FloatingTile* parent)
 
 	connectionSelector->setLookAndFeel(&hlaf);
 	indexSelector->setLookAndFeel(&hlaf);
+
+	connectionSelector->setWantsKeyboardFocus(false);
+	indexSelector->setWantsKeyboardFocus(false);
 
 #if USE_BACKEND
 
@@ -467,27 +471,12 @@ void PanelWithProcessorConnection::setContentWithUndo(Processor* newProcessor, i
 	fillIndexList(indexes);
 
 	refreshIndexList();
-
-#if USE_BACKEND
-	auto undoManager = dynamic_cast<BackendProcessor*>(getMainController())->getViewUndoManager();
-
-	String undoText;
-
-	
-	undoText << (currentProcessor.get() != nullptr ? currentProcessor->getId() : "Disconnected") << ": " << indexes[currentIndex] << " -> ";
-	undoText << (newProcessor != nullptr ? newProcessor->getId() : "Disconnected") << ": " << indexes[newIndex] << " -> ";
-
-	undoManager->beginNewTransaction(undoText);
-	undoManager->perform(new ProcessorConnection(this, newProcessor, newIndex, getAdditionalUndoInformation()));
-#else
-
+    
 	ScopedPointer<ProcessorConnection> connection = new ProcessorConnection(this, newProcessor, newIndex, getAdditionalUndoInformation());
 
 	connection->perform();
 
 	connection = nullptr;
-
-#endif
 
 	if (newIndex != -1)
 	{
@@ -512,7 +501,9 @@ bool PanelWithProcessorConnection::ProcessorConnection::perform()
 	{
 		panel->setCurrentProcessor(newProcessor.get());
 		panel->refreshIndexList();
-		panel->currentIndex = newIndex;
+
+		if(newIndex != -1)
+			panel->currentIndex = newIndex;
 		
 		panel->refreshContent();
 		
@@ -552,7 +543,9 @@ void PanelWithProcessorConnection::setContentForIdentifier(Identifier idToSearch
                 if (p->getProcessorTypeId() != idToSearch)
                     continue;
                 
-                p->setContentWithUndo(getProcessor(), 0);
+				auto currentIndex = jmax(0, p->getCurrentIndex());
+
+                p->setContentWithUndo(getProcessor(), currentIndex);
             }
         }
     }

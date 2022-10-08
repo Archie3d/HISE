@@ -67,14 +67,14 @@ namespace core
 
 struct table: public scriptnode::data::base
 {
-	SET_HISE_NODE_ID("table");
+	SN_NODE_ID("table");
 	SN_GET_SELF_AS_OBJECT(table);
 	SN_DESCRIPTION("a (symmetrical) lookup table based waveshaper");
 
-	HISE_EMPTY_HANDLE_EVENT;
-	HISE_EMPTY_SET_PARAMETER;
-	HISE_EMPTY_INITIALISE;
-	HISE_EMPTY_CREATE_PARAM;
+	SN_EMPTY_HANDLE_EVENT;
+	SN_EMPTY_SET_PARAMETER;
+	SN_EMPTY_INITIALISE;
+	SN_EMPTY_CREATE_PARAM;
 
 	using TableSpanType = span<float, SAMPLE_LOOKUP_TABLE_SIZE>;
 
@@ -159,13 +159,13 @@ class peak: public data::display_buffer_base<true>
 {
 public:
 
-	SET_HISE_NODE_ID("peak");
+	SN_NODE_ID("peak");
 	SN_GET_SELF_AS_OBJECT(peak);
 	SN_DESCRIPTION("create a modulation signal from the input peak");
 
-	HISE_EMPTY_CREATE_PARAM;
-	HISE_EMPTY_HANDLE_EVENT;
-	HISE_EMPTY_INITIALISE;
+	SN_EMPTY_CREATE_PARAM;
+	SN_EMPTY_HANDLE_EVENT;
+	SN_EMPTY_INITIALISE;
 
 	bool isPolyphonic() const { return false; }
 
@@ -235,15 +235,15 @@ public:
 	}
 	
 
-	SET_HISE_NODE_ID("recorder");
+	SN_NODE_ID("recorder");
 	SN_GET_SELF_AS_OBJECT(recorder);
 	SN_DESCRIPTION("Record the signal input into a audio file slot");
 
 	static constexpr bool isPolyphonic() { return false; }
 
-	HISE_EMPTY_MOD;
-	HISE_EMPTY_HANDLE_EVENT;
-	HISE_EMPTY_INITIALISE;
+	SN_EMPTY_MOD;
+	SN_EMPTY_HANDLE_EVENT;
+	SN_EMPTY_INITIALISE;
 
 	void reset()
 	{
@@ -413,15 +413,15 @@ class mono2stereo : public HiseDspBase
 {
 public:
 
-	SET_HISE_NODE_ID("mono2stereo");
+	SN_NODE_ID("mono2stereo");
 	SN_GET_SELF_AS_OBJECT(mono2stereo);
 	SN_DESCRIPTION("converts a mono signal to a stereo signal (`L->L+R`)");
 
-	HISE_EMPTY_PREPARE;
-	HISE_EMPTY_CREATE_PARAM;
-	HISE_EMPTY_RESET;
-	HISE_EMPTY_HANDLE_EVENT;
-	HISE_EMPTY_SET_PARAMETER;
+	SN_EMPTY_PREPARE;
+	SN_EMPTY_CREATE_PARAM;
+	SN_EMPTY_RESET;
+	SN_EMPTY_HANDLE_EVENT;
+	SN_EMPTY_SET_PARAMETER;
 	
 	template <typename ProcessDataType> void process(ProcessDataType& data)
 	{
@@ -446,37 +446,75 @@ class empty : public HiseDspBase
 {
 public:
 
-	SET_HISE_NODE_ID("empty");
+	SN_NODE_ID("empty");
 	SN_GET_SELF_AS_OBJECT(empty);
 
-	HISE_EMPTY_PREPARE;
-	HISE_EMPTY_CREATE_PARAM;
-	HISE_EMPTY_PROCESS;
-	HISE_EMPTY_PROCESS_SINGLE;
-	HISE_EMPTY_RESET;
-	HISE_EMPTY_HANDLE_EVENT;
+	SN_EMPTY_PREPARE;
+	SN_EMPTY_CREATE_PARAM;
+	SN_EMPTY_PROCESS;
+	SN_EMPTY_PROCESS_FRAME;
+	SN_EMPTY_RESET;
+	SN_EMPTY_HANDLE_EVENT;
 };
 
 
-
+/** A SNEX node that can be used to implement waveshaping algorithms.
+   @ingroup snex_nodes
+ 
+    If you're writing a waveshaper that transforms the audio signal, you can use this
+    class. It gives you a special callback and also a display that shows the waveshaper function.
+ 
+    > Be aware that if you export this node to C++, it will use this class as template to create a full node, but in SNEX you don't need to supply the ShaperType template parameter.
+ 
+    The default code template forwards all rendering functions to a single `getSample(float input)` method. As long as you your algorithm is stateless,
+    you can just implement the logic there, otherwise you have to adapt the boilerplate process calls accordingly:
+ 
+    @code
+    // this will be called for every sample in every channel
+    float getSample(float input)
+    {
+        return input;
+    }
+ 
+    // these callbacks just forward to the method above
+    template <typename T> void process(T& data)
+    {
+        for(auto ch: data)
+        {
+            for(auto& s: data.toChannelData(ch))
+            {
+                s = getSample(s);
+            }
+        }
+    }
+ 
+    template <typename T> void processFrame(T& data)
+    {
+        for(auto& s: data)
+            s = getSample(s);
+    }
+    @endcode
+ */
 template <class ShaperType> struct snex_shaper
 {
-	SET_HISE_NODE_ID("snex_shaper");
+	SN_NODE_ID("snex_shaper");
 	SN_GET_SELF_AS_OBJECT(snex_shaper);
 	SN_DESCRIPTION("A custom waveshaper using SNEX");
 
-	HISE_EMPTY_HANDLE_EVENT;
+	SN_EMPTY_HANDLE_EVENT;
 	
 	snex_shaper()
 	{
 		cppgen::CustomNodeProperties::setPropertyForObject(*this, PropertyIds::TemplateArgumentIsPolyphonic);
 	}
 
+    /** @see snex_node::prepare() */
 	void prepare(PrepareSpecs ps)
 	{
 		shaper.prepare(ps);
 	}
 
+    /** @see snex_node::reset() */
 	void reset()
 	{
 		shaper.reset();
@@ -492,16 +530,19 @@ template <class ShaperType> struct snex_shaper
 
 	ShaperType shaper;
 
+    /** @see snex_node::process*/
 	template <typename ProcessDataType> void process(ProcessDataType& data)
 	{
 		shaper.process(data);
 	}
 
+    /** @see snex_node::processFrame */
 	template <typename FrameDataType> void processFrame(FrameDataType& data)
 	{
 		shaper.processFrame(data);
 	}
 
+    /** @see snex_node::setExternalData(). */
 	void setExternalData(const ExternalData& d, int index)
 	{
 		if constexpr (prototypes::check::setExternalData<ShaperType>::value)
@@ -513,9 +554,14 @@ template <class ShaperType> struct snex_shaper
 		auto t = static_cast<snex_shaper<ShaperType>*>(obj);
 		t->shaper.template setParameter<P>(v);
 	}
-    PARAMETER_MEMBER_FUNCTION;
-
-	HISE_EMPTY_CREATE_PARAM;
+    
+    /** @see snex_node::setParameter<P>() */
+    template <int P> void setParameter(double v)
+    {
+        setParameterStatic<P>(this, v);
+    }
+    
+	SN_EMPTY_CREATE_PARAM;
 };
 
 template <int NV, bool UseRingBuffer=false> class ramp : public data::display_buffer_base<UseRingBuffer>
@@ -532,7 +578,7 @@ public:
 
 	static constexpr int NumVoices = NV;
 
-	SET_HISE_POLY_NODE_ID("ramp");
+	SN_POLY_NODE_ID("ramp");
 	SN_GET_SELF_AS_OBJECT(ramp);
 	SN_DESCRIPTION("Creates a ramp signal that can be used as modulation source");
 
@@ -560,7 +606,7 @@ public:
 		}
 	}
 
-	HISE_EMPTY_INITIALISE;
+	SN_EMPTY_INITIALISE;
 
 	static constexpr bool isNormalisedModulation() { return true; };
 
@@ -570,7 +616,7 @@ public:
 		DEF_PARAMETER(LoopStart, ramp);
 		DEF_PARAMETER(Gate, ramp);
 	}
-	PARAMETER_MEMBER_FUNCTION;
+	SN_PARAMETER_MEMBER_FUNCTION;
 
 	template <typename ProcessDataType> void process(ProcessDataType& d)
 	{
@@ -653,7 +699,7 @@ public:
 		}
 	}
 
-	HISE_EMPTY_HANDLE_EVENT;
+	SN_EMPTY_HANDLE_EVENT;
 
 	void setGate(double onOffValue)
 	{
@@ -711,6 +757,307 @@ private:
 	PolyData<State, NumVoices> state;
 };
 
+template <int NV, bool UseRingBuffer> class clock_ramp : public polyphonic_base,
+														 public data::display_buffer_base<UseRingBuffer>,
+														 public hise::TempoListener
+{
+public:
+
+	enum class InactiveMode
+	{
+		LastValue,
+		Zero,
+		One,
+		numInactiveModes
+	};
+
+	enum class Parameters
+	{
+		Tempo,
+		Multiplier,
+		AddToSignal,
+		UpdateMode,
+		Inactive,
+		numParameters
+	};
+
+	static constexpr int NumVoices = NV;
+
+	SN_POLY_NODE_ID("clock_ramp");
+	SN_GET_SELF_AS_OBJECT(clock_ramp);
+	SN_DESCRIPTION("Creates a (monophonic) ramp signal that is synced to the HISE clock");
+
+	static constexpr bool isNormalisedModulation() { return true; };
+
+	clock_ramp():
+		polyphonic_base(getStaticId())
+	{
+		cppgen::CustomNodeProperties::setPropertyForObject(*this, PropertyIds::IsPolyphonic);
+		cppgen::CustomNodeProperties::setPropertyForObject(*this, PropertyIds::UseRingBuffer);
+	}
+
+	~clock_ramp()
+	{
+		if (syncer != nullptr)
+			syncer->deregisterItem(this);
+	}
+
+	void prepare(PrepareSpecs ps)
+	{
+		ps.voiceIndex->getTempoSyncer()->registerItem(this);
+		sr = ps.sampleRate;
+	}
+
+	SN_EMPTY_INITIALISE;
+
+	
+
+	SN_EMPTY_RESET;
+	SN_EMPTY_HANDLE_EVENT;
+	
+	void onTransportChange(bool isPlaying_, double ppqPosition) override
+	{
+		isPlaying = isPlaying_;
+
+		if (isPlaying)
+		{
+			if (isContinuous)
+			{
+				startOffset = ppqPosition / (startMultiplier * startFactor);
+			}
+			else
+				startOffset = ppqPosition;
+
+			for (auto& s : state)
+				s.ppqPos = 0.0;
+		}
+	}
+
+	void tempoChanged(double newTempo) override
+	{
+		bpm = newTempo;
+	}
+
+	bool handleModulation(double& v)
+	{
+		return state.get().modValue.getChangedValue(v);
+	}
+
+	double getPPQDelta(int numSamples) const
+	{
+		if (auto tempoSamples = TempoSyncer::getTempoInSamples(bpm, sr, 1.0f))
+			return (double)numSamples / tempoSamples;
+		else
+			return 0.0;
+	}
+
+	template <typename ProcessDataType> void process(ProcessDataType& d)
+	{
+		auto& s = state.get();
+
+		double valueToUse[(int)InactiveMode::numInactiveModes];
+
+		valueToUse[(int)InactiveMode::Zero] = 0.0;
+		valueToUse[(int)InactiveMode::One] = 1.0;
+
+		if (isPlaying)
+		{
+			auto ppqDelta = getPPQDelta(d.getNumSamples());
+			auto tf = s.tempoFactor * s.multiplier;
+
+			double tfDelta;
+			double start;
+
+			if (isContinuous)
+			{
+				tfDelta = ppqDelta / tf;
+				start = std::fmod(s.ppqPos + startOffset, 1.0);
+				s.ppqPos += tfDelta;
+			}
+				
+			else
+			{
+				tfDelta = ppqDelta * tf;
+				start = std::fmod(s.ppqPos + startOffset, tf) / tf;
+				s.ppqPos += ppqDelta;
+			}
+
+			double lastValue = 0.0;
+
+			if (addToSignal)
+			{
+				auto data = d.getRawChannelPointers()[0];
+				auto inc = tfDelta / (double)d.getNumSamples();
+
+				for (int i = 0; i < d.getNumSamples(); i++)
+				{
+					lastValue = hmath::fmod(start + (double)inc, 1.0);
+					data[i] = (float)lastValue;
+				}
+			}
+			else
+			{
+				lastValue = hmath::fmod(start + tfDelta, 1.0);
+			}
+
+			s.modValue.setModValue(lastValue);	
+		}
+		else if (addToSignal)
+		{
+			valueToUse[(int)InactiveMode::LastValue] = s.modValue.getModValue();
+
+			FloatVectorOperations::fill(d.getRawChannelPointers()[0], (float)valueToUse[(int)inactiveMode], d.getNumSamples());
+		}
+
+		valueToUse[(int)InactiveMode::LastValue] = s.modValue.getModValue();
+
+		this->updateBuffer((float)valueToUse[(int)inactiveMode], d.getNumSamples());
+	}
+
+	template <typename FrameType> void processFrame(FrameType& d)
+	{
+		auto& s = state.get();
+
+		double valueToUse[(int)InactiveMode::numInactiveModes];
+
+		valueToUse[(int)InactiveMode::Zero] = 0.0;
+		valueToUse[(int)InactiveMode::One] = 1.0;
+
+		if (isPlaying)
+		{
+			auto ppqDelta = getPPQDelta(1);
+			auto tf = s.tempoFactor * s.multiplier;
+			auto start = hmath::fmod(s.ppqPos + startOffset, tf) / tf;
+			auto modValue = hmath::fmod(start + ppqDelta * tf, 1.0);
+
+			if (addToSignal)
+				d[0] = (float)modValue;
+
+			s.ppqPos += ppqDelta;
+			s.modValue.setModValue(modValue);
+		}
+		else if(addToSignal)
+		{
+			valueToUse[(int)InactiveMode::LastValue] = s.modValue.getModValue();
+
+			d[0] = (float)valueToUse[(int)inactiveMode];
+		}
+
+		valueToUse[(int)InactiveMode::LastValue] = s.modValue.getModValue();
+
+		this->updateBuffer(valueToUse[(int)inactiveMode], 1);
+	}
+
+	void setTempo(double newTempo)
+	{
+		auto newFactor = TempoSyncer::getTempoFactor((TempoSyncer::Tempo)(int)newTempo);
+
+		startFactor = newFactor;
+
+		for (auto& s : state)
+			s.tempoFactor = newFactor;
+	}
+
+	void setMultiplier(double newMultiplier)
+	{
+		startMultiplier = newMultiplier;
+
+		for (auto& s : state)
+			s.multiplier = newMultiplier;
+	}
+
+	void setAddToSignal(double newValue)
+	{
+		addToSignal = newValue > 0.5;
+	}
+
+	void setUpdateMode(double newBehaviour)
+	{
+		isContinuous = newBehaviour < 0.5;
+	}
+
+	void setInactive(double newInactiveMode)
+	{
+		inactiveMode = (InactiveMode)(int)newInactiveMode;
+	}
+
+	DEFINE_PARAMETERS
+	{
+		DEF_PARAMETER(Tempo, clock_ramp);
+		DEF_PARAMETER(Multiplier, clock_ramp);
+		DEF_PARAMETER(AddToSignal, clock_ramp);
+		DEF_PARAMETER(UpdateMode, clock_ramp);
+		DEF_PARAMETER(Inactive, clock_ramp);
+	};
+
+	SN_PARAMETER_MEMBER_FUNCTION;
+
+	void createParameters(ParameterDataList& data)
+	{
+		{
+			parameter::data p("Tempo");
+			p.setRange({ 0.0, 1.0 });
+			p.setParameterValueNames(TempoSyncer::getTempoNames());
+			p.setDefaultValue((double)TempoSyncer::getTempoIndex("1/4"));
+			registerCallback<(int)Parameters::Tempo>(p);
+			data.add(std::move(p));
+		}
+		{
+			parameter::data p("Multiplier");
+			p.setRange({ 1.0, 16.0, 1.0 });
+			p.setDefaultValue(1.0);
+			registerCallback<(int)Parameters::Multiplier>(p);
+			data.add(std::move(p));
+		}
+		{
+			parameter::data p("AddToSignal");
+			p.setParameterValueNames({ "No", "Yes" });
+			p.setDefaultValue(0.0);
+			registerCallback<(int)Parameters::AddToSignal>(p);
+			data.add(std::move(p));
+		}
+		{
+			parameter::data p("UpdateMode");
+			p.setParameterValueNames({ "Continuous", "Synced" });
+			p.setDefaultValue(1.0);
+			registerCallback<(int)Parameters::UpdateMode>(p);
+			data.add(std::move(p));
+		}
+		{
+			parameter::data p("Inactive");
+			p.setParameterValueNames({ "Current", "Zero", "One" });
+			p.setDefaultValue(0.0);
+			registerCallback<(int)Parameters::Inactive>(p);
+			data.add(std::move(p));
+		}
+	}
+
+	double startOffset = 0.0;
+	double bpm = 120.0;
+	double sr = 44100.0;
+	bool addToSignal = false;
+	bool isPlaying = false;
+	double startFactor = 1.0f;
+	double startMultiplier = 1.0f;
+
+	bool isContinuous = false;
+	InactiveMode inactiveMode = InactiveMode::LastValue;
+
+	struct State
+	{
+		double tempoFactor = 1.0;
+		double multiplier = 1.0;
+		double ppqPos = 0.0;
+		ModValue modValue;
+	};
+
+	PolyData<State, NV> state;
+	
+
+
+	DllBoundaryTempoSyncer* syncer = nullptr;
+};
+
 
 template <int NV> class oscillator: public OscillatorDisplayProvider,
 								    public polyphonic_base
@@ -730,11 +1077,11 @@ public:
 
 	constexpr static int NumVoices = NV;
 
-	SET_HISE_POLY_NODE_ID("oscillator");
+	SN_POLY_NODE_ID("oscillator");
 	SN_GET_SELF_AS_OBJECT(oscillator);
 	SN_DESCRIPTION("A tone generator with multiple waveforms");
 
-	HISE_EMPTY_INITIALISE;
+	SN_EMPTY_INITIALISE;
 
 	oscillator(): polyphonic_base(getStaticId()) {}
 
@@ -752,6 +1099,8 @@ public:
 	{
 		currentVoiceData = &voiceData.get();
 
+		currentNyquistGain = currentVoiceData->getNyquistAttenuationGain();
+
 		if (currentVoiceData->enabled == 0)
 			return;
 
@@ -759,29 +1108,25 @@ public:
 		{
 			auto fd = data.template as<ProcessData<2>>().toFrameData();
 			while (fd.next())
-				processFrame(fd.toSpan());
+				processFrameInternal(fd.toSpan());
 		}
 		else
 		{
 			for (auto& s : data[0])
 			{
 				auto asSpan = reinterpret_cast<span<float, 1>*>(&s);
-				processFrame(*asSpan);
+				processFrameInternal(*asSpan);
 			}
 		}
 	}
 
-	template <typename FrameDataType> void processFrame(FrameDataType& data)
+	template <typename FrameDataType> void processFrameInternal(FrameDataType& data)
 	{
-		if (currentVoiceData == nullptr)
-			currentVoiceData = &voiceData.get();
+		jassert(currentVoiceData != nullptr);
 
-		if (currentVoiceData->enabled == 0)
-			return;
+		float v = 0.0f;
 
-        float v = 0.0f;
-
-		auto g = currentVoiceData->gain;
+		auto g = currentVoiceData->gain * currentNyquistGain;
 
 		switch (currentMode)
 		{
@@ -790,11 +1135,25 @@ public:
 		case Mode::Saw:		 v = g * tickSaw(*currentVoiceData); break;
 		case Mode::Square:	 v = g * tickSquare(*currentVoiceData); break;
 		case Mode::Noise:	 v = g * (Random::getSystemRandom().nextFloat() * 2.0f - 1.0f);
-        default: break;
+		default: break;
 		}
-        
+
 		for (auto& s : data)
 			s += v;
+	}
+
+	template <typename FrameDataType> void processFrame(FrameDataType& data)
+	{
+		if (currentVoiceData == nullptr)
+		{
+			currentVoiceData = &voiceData.get();
+			currentNyquistGain = currentVoiceData->getNyquistAttenuationGain();
+		}
+
+		if (currentVoiceData->enabled == 0)
+			return;
+
+		processFrameInternal(data);
 	}
 
 	void handleHiseEvent(HiseEvent& e)
@@ -821,7 +1180,7 @@ public:
 			parameter::data p("Freq Ratio");
 			p.setRange({ 1.0, 16.0, 1.0 });
 			p.setDefaultValue(1.0);
-			p.callback = parameter::inner<oscillator, (int)Parameters::PitchMultiplier>(*this);
+			registerCallback<(int)Parameters::PitchMultiplier>(p);
 			data.add(std::move(p));
 		}
 		{
@@ -931,7 +1290,7 @@ public:
 		DEF_PARAMETER(Phase, oscillator);
 	}
 
-	PARAMETER_MEMBER_FUNCTION;
+	SN_PARAMETER_MEMBER_FUNCTION;
 
 	double sr = 44100.0;
 	PolyData<OscData, NumVoices> voiceData;
@@ -940,6 +1299,7 @@ public:
 
 	double freqValue = 220.0;
 	
+	float currentNyquistGain = 1.0f;
 };
 
 template class oscillator<1>;
@@ -950,7 +1310,7 @@ template <int NV> struct file_player : public data::base,
 {
     static constexpr int NumVoices = NV;
 
-    SET_HISE_NODE_ID("file_player");
+    SN_NODE_ID("file_player");
     SN_GET_SELF_AS_OBJECT(file_player);
 
     enum class PlaybackModes
@@ -975,12 +1335,12 @@ template <int NV> struct file_player : public data::base,
         DEF_PARAMETER(RootFrequency, file_player);
         DEF_PARAMETER(FreqRatio, file_player);
     }
-    PARAMETER_MEMBER_FUNCTION;
+    SN_PARAMETER_MEMBER_FUNCTION;
 
     static constexpr bool isPolyphonic() { return NumVoices > 1; }
 
-    HISE_EMPTY_INITIALISE;
-    HISE_EMPTY_MOD;
+    SN_EMPTY_INITIALISE;
+    SN_EMPTY_MOD;
     SN_DESCRIPTION("A simple file player with multiple playback modes");
 
     file_player(): polyphonic_base(getStaticId()) {};
@@ -1300,9 +1660,9 @@ public:
 		DEF_PARAMETER(FreqMultiplier, fm);
 		DEF_PARAMETER(Gate, fm);
 	}
-	PARAMETER_MEMBER_FUNCTION;
+	SN_PARAMETER_MEMBER_FUNCTION;
 
-	SET_HISE_NODE_ID("fm");
+	SN_NODE_ID("fm");
 	SN_GET_SELF_AS_OBJECT(fm);
 	SN_DESCRIPTION("A FM oscillator that uses the signal input as FM source");
 
@@ -1370,11 +1730,11 @@ public:
 		DEF_PARAMETER(Smoothing, gain_impl);
 		DEF_PARAMETER(ResetValue, gain_impl);
 	}
-	PARAMETER_MEMBER_FUNCTION;
+	SN_PARAMETER_MEMBER_FUNCTION;
 
 	static constexpr int NumVoices = V;
 
-	SET_HISE_POLY_NODE_ID("gain");
+	SN_POLY_NODE_ID("gain");
 	SN_GET_SELF_AS_OBJECT(gain_impl);
 	SN_DESCRIPTION("A gain module with decibel range and parameter smoothing");
 
@@ -1505,18 +1865,18 @@ public:
 		DEF_PARAMETER(SmoothingTime, smoother);
 		DEF_PARAMETER(DefaultValue, smoother);
 	}
-	PARAMETER_MEMBER_FUNCTION;
+	SN_PARAMETER_MEMBER_FUNCTION;
 
 	static constexpr int NumVoices = NV;
 
-	SET_HISE_POLY_NODE_ID("smoother");
+	SN_POLY_NODE_ID("smoother");
 	SN_GET_SELF_AS_OBJECT(smoother);
 	SN_DESCRIPTION("Smoothes the input signal using a low pass filter");
 
 	smoother() {};
 
-	HISE_EMPTY_INITIALISE;
-	HISE_EMPTY_MOD;
+	SN_EMPTY_INITIALISE;
+	SN_EMPTY_MOD;
     
 	void createParameters(ParameterDataList& data)
 	{
@@ -1643,9 +2003,9 @@ template <int NV, typename T> struct snex_osc : public snex_osc_base<T>,
 		}
 	}
 
-	PARAMETER_MEMBER_FUNCTION;
+	SN_PARAMETER_MEMBER_FUNCTION;
 
-	SET_HISE_POLY_NODE_ID("snex_osc");
+	SN_POLY_NODE_ID("snex_osc");
 	SN_GET_SELF_AS_OBJECT(snex_osc);
 	SN_DESCRIPTION("A custom oscillator node using SNEX");
 

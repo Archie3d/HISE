@@ -131,6 +131,8 @@ public:
 
 	void notifySiblingChange();
 
+	void moveContent(int oldIndex, int newIndex);
+
 protected:
 
 	virtual void componentAdded(FloatingTile* newComponent) = 0;
@@ -158,6 +160,7 @@ public:
 	enum TabPropertyIds
 	{
 		CurrentTab = FloatingTileContainer::ContainerPropertyIds::numContainerPropertyIds,
+		CycleKeyPress,
 		numTabPropertyIds
 	};
 
@@ -226,8 +229,19 @@ public:
 
 	void setAddButtonCallback(const std::function<void()>& f);
 
+	void currentTabChanged(int newCurrentTabIndex, const String& newCurrentTabName) override;
+
+    Identifier getCycleKeyPress() const { return cycleKeyId; }
+    
+    void setCycleKeyPress(const Identifier& k)
+    {
+        cycleKeyId = k;
+    }
+    
 private:
 
+    Identifier cycleKeyId;
+    
 	ScopedPointer<ShapeButton> addButton;
 
 	PopupLookAndFeel plaf;

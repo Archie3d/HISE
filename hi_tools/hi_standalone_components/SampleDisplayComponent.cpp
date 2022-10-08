@@ -38,20 +38,18 @@ void AudioDisplayComponent::drawPlaybackBar(Graphics &g)
 {
 	if(playBackPosition > 0.0 && getSampleArea(0)->getWidth() != 0)
 	{
+		if (auto tlaf = dynamic_cast<HiseAudioThumbnail::LookAndFeelMethods*>(&getThumbnail()->getLookAndFeel()))
+		{
+			NormalisableRange<double> range((double)getSampleArea(0)->getX(), (double)getSampleArea(0)->getRight());
 
-		NormalisableRange<double> range((double)getSampleArea(0)->getX(), (double)getSampleArea(0)->getRight());
+			playBackPosition = jlimit<double>(0.0, 1.0, playBackPosition);
 
-		playBackPosition = jlimit<double>(0.0, 1.0, playBackPosition);
+			const int x = (int)(range.convertFrom0to1(playBackPosition));
 
-		const int x = (int)(range.convertFrom0to1(playBackPosition));
-
-		g.setColour(Colours::lightgrey.withAlpha(0.05f));
-		g.fillRect((float)x, 0.0f, x == 0 ? 5.0f : 10.0f, (float)getHeight());
-		
-		//g.fillRect(jmax(0.0f, value * (float)getWidth()-5.0f), 0.0f, value == 0.0f ? 5.0f : 10.0f, (float)getHeight());
-		g.setColour(Colours::white.withAlpha(0.6f));
-		g.drawLine(Line<float>((float)x, 0.0f, (float)x, (float)getHeight()), 0.5f);
-
+			tlaf->drawThumbnailRuler(g, *getThumbnail(), x);
+		}
+		else
+			jassertfalse;
 	}
 }
 
@@ -216,6 +214,18 @@ void HiseAudioThumbnail::LookAndFeelMethods::drawThumbnailRange(Graphics& g, His
     ug.draw1PxRect(area);
 }
 
+void HiseAudioThumbnail::LookAndFeelMethods::drawThumbnailRuler(Graphics& g, HiseAudioThumbnail& te, int x)
+{
+	auto l = Line<float>((float)x, 0.0f, (float)x, (float)te.getHeight());
+	auto r = Rectangle<float>((float)x, 0.0f, x == 0 ? 5.0f : 10.0f, (float)te.getHeight());
+
+	g.setColour(Colours::lightgrey.withAlpha(0.05f));
+	g.fillRect(r);
+
+	g.setColour(Colours::white.withAlpha(0.6f));
+	g.drawLine(l, 0.5f);
+}
+
 void AudioDisplayComponent::SampleArea::paint(Graphics &g)
 {
 	if(area == AreaTypes::LoopCrossfadeArea)
@@ -226,21 +236,58 @@ void AudioDisplayComponent::SampleArea::paint(Graphics &g)
 		auto h = (float)getHeight();
 		auto z = 0.0f;
 
+		
+
 		if (!reversed)
 		{
 			fadeInPath.startNewSubPath(z, h);
-			fadeInPath.lineTo(w, z);
-			fadeInPath.lineTo(w, h);
+
+			if (gamma == 1.0f)
+			{
+				fadeInPath.lineTo(w, z);
+				fadeInPath.lineTo(w, h);
+			}
+			else
+			{
+				for (float x = z; x < w; x += 3.0f)
+				{
+					float gain = (x - z) / w;
+					gain = std::pow(gain, gamma);
+					float y = h - gain * h;
+					fadeInPath.lineTo(x, y);
+				}
+
+				fadeInPath.lineTo(w, h);
+			}
+			
 			fadeInPath.closeSubPath();
 		}
 		else
 		{
-			fadeInPath.startNewSubPath(z, z);
-			fadeInPath.lineTo(w, h);
-			fadeInPath.lineTo(z, h);
+			
+
+			if (gamma == 1.0f)
+			{
+				fadeInPath.startNewSubPath(z, z);
+				fadeInPath.lineTo(w, h);
+				fadeInPath.lineTo(z, h);
+			}
+			else
+			{
+				fadeInPath.startNewSubPath(w, h);
+				for (float x = z; x < w; x += 3.0f)
+				{
+					float gain = (x - z) / w;
+					gain = std::pow(gain, gamma);
+					float y = h - gain * h;
+					fadeInPath.lineTo(w - x, y);
+				}
+
+				fadeInPath.lineTo(z, h);
+			}
+			
 			fadeInPath.closeSubPath();
 		}
-		
 
 		g.setColour(getAreaColour((AreaTypes)area).withAlpha(areaEnabled ? 0.1f : 0.05f));
 		g.fillPath(fadeInPath);
@@ -342,6 +389,12 @@ Colour AudioDisplayComponent::SampleArea::getAreaColour(AreaTypes area)
 
 
 
+void AudioDisplayComponent::SampleArea::setGamma(float newGamma)
+{
+	gamma = jlimit<float>(0.125f, 16.0f, newGamma);
+	repaint();
+}
+
 void AudioDisplayComponent::SampleArea::EdgeLookAndFeel::drawStretchableLayoutResizerBar (Graphics &g, 
 																   int w, int h, 
 																   bool isVerticalBar, 
@@ -374,6 +427,8 @@ void HiseAudioThumbnail::LoadingThread::run()
 	var rb;
 	ScopedPointer<AudioFormatReader> reader;
 
+    
+    
 	bool sv = false;
 
 	{
@@ -382,6 +437,7 @@ void HiseAudioThumbnail::LoadingThread::run()
 
 		ScopedLock sl(parent->lock);
 
+        
 		sv = parent->shouldScaleVertically();
 
 		bounds = parent->getBounds();
@@ -585,19 +641,22 @@ void HiseAudioThumbnail::LoadingThread::calculatePath(Path &p, float width, cons
 	auto rawStride = (float)numSamples / width;
     
 	int stride = roundToInt(rawStride);
-    
+
     auto downSamplingFactor = jlimit(1, 3, roundToInt(width / 1000));
     
+	if (parent->currentOptions.manualDownSampleFactor != -1.0f)
+		downSamplingFactor = (int)parent->currentOptions.manualDownSampleFactor;
+
 	stride = jmax<int>(1, stride * downSamplingFactor);
 
-	if (parent->displayMode == DisplayMode::DownsampledCurve)
+	if (parent->currentOptions.displayMode == DisplayMode::DownsampledCurve)
 	{
 		p.clear();
 		stride = jmax(1, roundToInt(rawStride));
 
-        parent->useRectList = stride > JUCE_LIVE_CONSTANT_OFF(20);
+        parent->currentOptions.useRectList = stride > JUCE_LIVE_CONSTANT_OFF(20);
         
-        if(parent->useRectList)
+        if(parent->currentOptions.useRectList)
             stride /= 2;
         
 		auto numDownsampled = numSamples / stride;
@@ -609,7 +668,7 @@ void HiseAudioThumbnail::LoadingThread::calculatePath(Path &p, float width, cons
 
         auto getBufferValue = [&](int i)
         {
-            int numToCheck = jmin(numSamples - i, parent->useRectList ? stride * 2 : stride);
+            int numToCheck = jmin(numSamples - i, parent->currentOptions.useRectList ? stride * 2 : stride);
             auto range = FloatVectorOperations::findMinAndMax(l_ + i, numToCheck);
 
             float v = useMax ? range.getStart() : range.getEnd();
@@ -669,6 +728,11 @@ void HiseAudioThumbnail::LoadingThread::calculatePath(Path &p, float width, cons
 		p.startNewSubPath(0.0f, 0.0f);
 		
         bool useSymmetricWaveforms = stride > JUCE_LIVE_CONSTANT_OFF(60);
+        
+        if(parent->currentOptions.forceSymmetry != 0)
+        {
+            useSymmetricWaveforms = parent->currentOptions.forceSymmetry == 2;
+        }
         
         if(useSymmetricWaveforms)
         {
@@ -813,7 +877,7 @@ void HiseAudioThumbnail::LookAndFeelMethods::drawHiseThumbnailBackground(Graphic
     
 	g.setColour(fillColour.withAlpha(0.15f * wAlpha));
 
-	if (th.drawHorizontalLines)
+	if (th.currentOptions.drawHorizontalLines)
 	{
 		g.drawHorizontalLine(area.getY() + area.getHeight() / 4, 0.0f, (float)th.getWidth());
 		g.drawHorizontalLine(area.getY() + 3 * area.getHeight() / 4, 0.0f, (float)th.getWidth());
@@ -855,7 +919,7 @@ void HiseAudioThumbnail::LookAndFeelMethods::drawHiseThumbnailRectList(Graphics&
 	Colour fillColour = th.findColour(AudioDisplayComponent::ColourIds::fillColour).withMultipliedAlpha(wAlpha);
 	Colour outlineColour = th.findColour(AudioDisplayComponent::ColourIds::outlineColour).withMultipliedAlpha(wAlpha);
 
-    if(th.displayMode == DisplayMode::DownsampledCurve)
+    if(th.currentOptions.displayMode == DisplayMode::DownsampledCurve)
         fillColour = outlineColour;
     
 	if (!areaIsEnabled)
@@ -1272,7 +1336,7 @@ void HiseAudioThumbnail::setRange(const int left, const int right)
 
 void HiseAudioThumbnail::createCurvePathForCurrentView(bool isLeft, Rectangle<int> area)
 {
-	if (displayMode != DisplayMode::DownsampledCurve)
+	if (currentOptions.displayMode != DisplayMode::DownsampledCurve)
 		return;
 
     auto& rToUse = isLeft ? leftPeaks : rightPeaks;
@@ -1319,7 +1383,7 @@ void HiseAudioThumbnail::createCurvePathForCurrentView(bool isLeft, Rectangle<in
         return -1.0f * v;
     };
     
-    if(!useRectList)
+    if(!currentOptions.useRectList)
     {
         pToUse.preallocateSpace((end - start) + 3);
         

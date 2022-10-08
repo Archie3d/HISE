@@ -84,14 +84,27 @@ public:
 		MessageManager::callAsync(SafeAsyncCaller<T>(&object, f));
 	}
 
+	template <typename T> static void callAsyncIfNotOnMessageThread(T& object, std::function<void(T&)> f)
+	{
+		if (MessageManager::getInstance()->isThisTheMessageThread())
+			f(object);
+		else
+			MessageManager::callAsync(SafeAsyncCaller<T>(&object, f));
+	}
+
+	template <typename T> static void callWithDelay(T& object, std::function<void(T&)> f, int milliseconds)
+	{
+		Timer::callAfterDelay(milliseconds, SafeAsyncCaller<T>(&object, f));
+	}
+
 	static void resized(Component* c)
 	{
-		call<Component>(*c, [](Component& c) { c.resized(); });
+		callAsyncIfNotOnMessageThread<Component>(*c, [](Component& c) { c.resized(); });
 	}
 
 	static void repaint(Component* c)
 	{
-		call<Component>(*c, [](Component& c) { c.repaint(); });
+		callAsyncIfNotOnMessageThread<Component>(*c, [](Component& c) { c.repaint(); });
 	}
 };
 
@@ -154,6 +167,15 @@ struct audio_spin_mutex_shared
 {
 	void lock() noexcept
 	{
+		// We need to check the counter before
+		// locking the internal mutex to allow reentrant
+		// read locks
+		while (sharedCounter.load() > 0)
+		{
+			_mm_pause();
+			_mm_pause();
+		}
+
 		w.lock();
 
 		constexpr std::array<int, 3> iterations = { 5, 10, 3000 };
@@ -187,8 +209,6 @@ struct audio_spin_mutex_shared
 				_mm_pause();
 				_mm_pause();
 			}
-
- 			jassertfalse;
 		}
 	}
 
@@ -229,6 +249,18 @@ struct audio_spin_mutex_shared
 	audio_spin_mutex w;
     std::atomic<int> sharedCounter {0};
 };
+
+
+struct WeakErrorHandler
+{
+	using Ptr = WeakReference<WeakErrorHandler>;
+
+	virtual ~WeakErrorHandler() {};
+	virtual void handleErrorMessage(const String& error) = 0;
+
+	JUCE_DECLARE_WEAK_REFERENCEABLE(WeakErrorHandler);
+};
+
 
 
 /** Same as MessageManager::callAsync, but uses a Safe pointer for a component and cancels the async execution if the object is deleted. */
@@ -497,6 +529,143 @@ private:
 	juce::Colour backgroundColour{ juce::Colours::black };
 };
 
+
+struct TopLevelWindowWithKeyMappings
+{
+	static KeyPress getKeyPressFromString(Component* c, const String& s)
+	{
+		if (s.isEmpty())
+			return {};
+
+		if (s.startsWith("$"))
+		{
+			auto id = Identifier(s.removeCharacters("$"));
+			return getFirstKeyPress(c, id);
+		}
+		else
+			return KeyPress::createFromDescription(s);
+	}
+
+	static void addShortcut(Component* c, const String& category, const Identifier& id, const String& description, const KeyPress& k)
+	{
+		if (auto t = getFromComponent(c))
+		{
+			if (t->shortcutIds.contains(id))
+				return;
+
+			auto info = ApplicationCommandInfo(t->shortcutIds.size() + 1);
+			t->shortcutIds.add(id);
+
+			info.categoryName = category;
+			info.shortName << description << " ($" << id.toString() << ")";
+			info.defaultKeypresses.add(k);
+			t->m.registerCommand(info);
+			t->keyMap.resetToDefaultMapping(info.commandID);
+		}
+	}
+
+	static KeyPress getFirstKeyPress(Component* c, const Identifier& id)
+	{
+		if (auto t = getFromComponent(c))
+		{
+			if (auto idx = t->shortcutIds.indexOf(id) + 1)
+				return t->keyMap.getKeyPressesAssignedToCommand(idx).getFirst();
+		}
+
+		return KeyPress();
+	}
+
+	static bool matches(Component* c, const KeyPress& k, const Identifier& id)
+	{
+		if (auto t = getFromComponent(c))
+		{
+			if (auto idx = t->shortcutIds.indexOf(id) + 1)
+			{
+				return t->keyMap.getKeyPressesAssignedToCommand(idx).contains(k);
+			}
+		}
+
+		return false;
+	}
+
+	/*
+	static KeyPress getKeyPress(Component* c, const Identifier& id)
+	{
+		if (auto t = getFromComponent(c))
+		{
+			if (auto idx = t->shortcutIds.indexOf(id) + 1)
+				return t->keyMap.getKeyPressesAssignedToCommand(idx).getFirst();
+		}
+
+		return {};
+	}
+	*/
+
+	KeyPressMappingSet& getKeyPressMappingSet() { return keyMap; };
+
+protected:
+
+	TopLevelWindowWithKeyMappings() :
+		keyMap(m)
+	{};
+
+	virtual ~TopLevelWindowWithKeyMappings()
+	{
+		jassert(loaded);
+		// If you hit this assertion, you need to store the data in your
+		// sub class constructor
+		jassert(saved);
+	};
+
+	/** Call this function and initialise all key presses that you want to define. */
+	virtual void initialiseAllKeyPresses()
+	{
+		initialised = true;
+	}
+
+	void saveKeyPressMap()
+	{
+		auto f = getKeyPressSettingFile();
+		auto xml = keyMap.createXml(true);
+		f.replaceWithText(xml->createDocument(""));
+		saved = true;
+	}
+
+	void loadKeyPressMap()
+	{
+		initialiseAllKeyPresses();
+
+		auto f = getKeyPressSettingFile();
+
+		if (auto xml = XmlDocument::parse(f))
+			keyMap.restoreFromXml(*xml);
+
+		loaded = true;
+	}
+
+	virtual File getKeyPressSettingFile() const = 0;
+
+	
+
+private:
+
+	bool initialised = false;
+	bool saved = false;
+	bool loaded = false;
+
+	static TopLevelWindowWithKeyMappings* getFromComponent(Component* c)
+	{
+		if (auto same = dynamic_cast<TopLevelWindowWithKeyMappings*>(c))
+			return same;
+
+		return c->findParentComponentOfClass<TopLevelWindowWithKeyMappings>();
+	}
+
+	Array<Identifier> shortcutIds;
+	juce::ApplicationCommandManager m;
+	juce::KeyPressMappingSet keyMap;
+};
+
 /** A small helper interface class that allows you to find the topmost component
 	that might have a OpenGL context attached.
 
@@ -710,6 +879,8 @@ public:
 			startOrStop(false);
 		}
 
+		bool isTimerRunning() const { return isRunning; };
+
 		virtual void timerCallback() = 0;
 
 	private:
@@ -722,6 +893,8 @@ public:
 			{
 				if (safeThis.get() != nullptr)
 				{
+					safeThis->isRunning = shouldStart;
+
 					if(shouldStart)
 						safeThis.get()->updater->simpleTimers.addIfNotAlreadyThere(safeThis);
 					else
@@ -737,6 +910,7 @@ public:
 
 		JUCE_DECLARE_WEAK_REFERENCEABLE(SimpleTimer);
 
+		bool isRunning = false;
 		WeakReference<PooledUIUpdater> updater;
 	};
 
@@ -1620,6 +1794,8 @@ template <typename ReturnType, typename... Ps> struct SafeLambdaBase
 	virtual bool isValid() const = 0;
 
 	virtual bool matches(void* other) const = 0;
+
+	
 };
 
 template <class T, typename ReturnType, typename...Ps> struct SafeLambda : public SafeLambdaBase<ReturnType, Ps...>
@@ -1688,16 +1864,34 @@ template <typename...Ps> struct LambdaBroadcaster final
 	template <typename T, typename F> void addListener(T& obj, const F& f, bool sendWithInitialValue=true)
 	{
         {
-            
             removeDanglingObjects();
             
             auto t = new SafeLambda<T, void, Ps...>(obj, f);
             SimpleReadWriteLock::ScopedWriteLock sl(lock);
             listeners.add(t);
+
+			if (lockfreeUpdater != nullptr && !lockfreeUpdater->isTimerRunning())
+				lockfreeUpdater->start();
         }
 
 		if(sendWithInitialValue)
 			std::apply(*listeners.getLast(), lastValue);
+	}
+
+	/** Returns the number of listeners with the given class T (!= not a base class) that are registered to this object. */
+	template <typename T> int getNumListenersWithClass() const
+	{
+		using TypeToLookFor = SafeLambda<T, void, Ps...>;
+
+		int numListeners = 0;
+
+		for (auto l : listeners)
+		{
+			if (l->isValid() && dynamic_cast<TypeToLookFor*>(l) != nullptr)
+				numListeners++;
+		}
+
+		return numListeners;
 	}
 
 	/** Removes all callbacks for the given object. 
@@ -1720,6 +1914,9 @@ template <typename...Ps> struct LambdaBroadcaster final
 			}
 		}
 
+		if (listeners.isEmpty() && lockfreeUpdater != nullptr)
+			lockfreeUpdater->stop();
+
 		removeDanglingObjects();
 
 		return true;
@@ -1731,11 +1928,14 @@ template <typename...Ps> struct LambdaBroadcaster final
         
 		SimpleReadWriteLock::ScopedWriteLock sl(lock);
         std::swap(listeners, pendingDelete);
+
+		if (lockfreeUpdater != nullptr)
+			lockfreeUpdater->stop();
 	}
 
 	void enableLockFreeUpdate(PooledUIUpdater* updater)
 	{
-		if (updater != nullptr)
+		if (updater != nullptr && lockfreeUpdater != nullptr)
 			lockfreeUpdater = new LockFreeUpdater(*this, updater);
 	}
 
@@ -1771,6 +1971,9 @@ private:
 
 	void sendMessageInternal(NotificationType n, const std::tuple<Ps...>& value)
 	{
+        if(n == dontSendNotification)
+            return;
+        
 		if (valueQueue != nullptr)
 			valueQueue.get()->push(value);
 
@@ -1851,7 +2054,8 @@ private:
 			SimpleTimer(updater),
 			parent(p)
 		{
-			start();
+			if(!p.listeners.isEmpty())
+				start();
 		};
 
 		void timerCallback() override
@@ -2287,7 +2491,16 @@ public:
 	/** The note values. */
 	enum Tempo
 	{
+#if HISE_USE_EXTENDED_TEMPO_VALUES
+		EightBar = 0,
+		SixBar,
+		FourBar,
+		ThreeBar,
+		TwoBars,
+		Whole,
+#else
 		Whole = 0, ///< a whole note (1/1)
+#endif
 		HalfDuet, ///< a half note duole (1/2D)
 		Half, ///< a half note (1/2)
 		HalfTriplet, ///< a half triplet note (1/2T)
@@ -2349,6 +2562,345 @@ private:
 
 };
 
+struct MasterClock
+{
+	enum class State
+	{
+		Idle,
+		InternalClockPlay,
+		ExternalClockPlay,
+		numStates
+	};
+
+	enum class SyncModes
+	{
+		Inactive, //> No syncing going on
+		ExternalOnly, //< only reacts on external clock events
+		InternalOnly, //< only reacts on internal clock events
+		PreferInternal, //< override the clock value with the internal clock if it plays
+		PreferExternal, //< override the clock value with the external clock if it plays
+		SyncInternal, //< sync the internal clock when external playback starts
+		numSyncModes
+	};
+
+	void setSyncMode(SyncModes newSyncMode)
+	{
+		currentSyncMode = newSyncMode;
+	}
+
+	void changeState(int timestamp, bool internalClock, bool startPlayback)
+	{
+		if (currentSyncMode == SyncModes::Inactive)
+			return;
+
+		if (internalClock)
+			internalClockIsRunning = startPlayback;
+
+		// Already stopped / not running, just return
+		if (!startPlayback && currentState == State::Idle)
+			return;
+
+		// Nothing to do
+		if (internalClock && startPlayback && currentState == State::InternalClockPlay)
+			return;
+
+		// Nothing to do
+		if (!internalClock && startPlayback && currentState == State::ExternalClockPlay)
+			return;
+
+		// Ignore any internal clock events when the external is running and should be preferred
+		if(!shouldPreferInternal() && (currentState == State::ExternalClockPlay && internalClock))
+			return;
+
+		// Ignore any external clock events when the external is running and should be preferred
+		if (shouldPreferInternal() && (currentState == State::InternalClockPlay && !internalClock))
+			return;
+		
+		// Ignore the stop command from the external clock
+		if (currentSyncMode == SyncModes::SyncInternal && !startPlayback && !internalClock)
+			return;
+
+		nextTimestamp = timestamp;
+
+		if (startPlayback)
+			nextState = internalClock ? State::InternalClockPlay : State::ExternalClockPlay;
+		else
+			nextState = State::Idle;
+
+		// Restart the internal clock when the external is stopped
+		if (!internalClock && !startPlayback && internalClockIsRunning)
+		{
+			nextState = State::InternalClockPlay;
+		}
+	}
+
+	struct GridInfo
+	{
+		bool change = false;
+		bool firstGridInPlayback = false;
+		int16 timestamp;
+		int gridIndex;
+	};
+
+	GridInfo processAndCheckGrid(int numSamples, const AudioPlayHead::CurrentPositionInfo& externalInfo)
+	{
+		if (bpm != externalInfo.bpm)
+			setBpm(externalInfo.bpm);
+
+		GridInfo gi;
+
+		if (currentSyncMode == SyncModes::Inactive)
+			return gi;
+
+		if (currentSyncMode == SyncModes::SyncInternal && externalInfo.isPlaying)
+		{
+			uptime = externalInfo.timeInSamples;
+			samplesToNextGrid = gridDelta - (uptime % gridDelta);
+		}
+
+		if (currentState != nextState)
+		{
+			currentState = nextState;
+			uptime = numSamples - nextTimestamp;
+			currentGridIndex = 0;
+
+			if (currentState != State::Idle && gridEnabled)
+			{
+
+				gi.change = true;
+				gi.timestamp = nextTimestamp;
+				gi.gridIndex = currentGridIndex;
+				gi.firstGridInPlayback = true;
+
+				samplesToNextGrid = gridDelta - nextTimestamp;
+			}
+
+			nextTimestamp = 0;
+		}
+		else
+		{
+			if (currentState == State::Idle)
+				uptime = 0;
+			else
+			{
+				jassert(nextTimestamp == 0);
+				uptime += numSamples;
+
+				samplesToNextGrid -= numSamples;
+
+				if (samplesToNextGrid < 0 && gridEnabled)
+				{
+					currentGridIndex++;
+
+					gi.change = true;
+					gi.firstGridInPlayback = false;
+					gi.gridIndex = currentGridIndex;
+					gi.timestamp = numSamples + samplesToNextGrid;
+
+					samplesToNextGrid += gridDelta;
+				}
+			}
+		}
+
+		return gi;
+	}
+
+	bool isPlaying() const
+	{
+		return currentState == State::ExternalClockPlay || currentState == State::InternalClockPlay;
+	}
+
+	GridInfo updateFromExternalPlayHead(const AudioPlayHead::CurrentPositionInfo& info, int numSamples)
+	{
+		GridInfo gi;
+
+		if (currentSyncMode == SyncModes::Inactive)
+			return gi;
+
+		auto isPlayingExternally = currentState == State::ExternalClockPlay;
+		auto shouldPlayExternally = (currentSyncMode == SyncModes::ExternalOnly || currentSyncMode == SyncModes::PreferExternal) &&
+								    info.isPlaying;
+		
+ 		if (isPlayingExternally != shouldPlayExternally)
+		{
+			changeState(0, false, shouldPlayExternally);
+
+			if (currentSyncMode == SyncModes::PreferExternal &&
+				currentState == State::InternalClockPlay &&
+				nextState == State::ExternalClockPlay)
+			{
+				gi.change = true;
+				gi.gridIndex = 0;
+				gi.firstGridInPlayback = true;
+			}
+
+			currentState = nextState;
+
+			if (currentState == State::ExternalClockPlay && gridEnabled)
+			{
+				auto multiplier = (double)TempoSyncer::getTempoFactor(clockGrid);
+
+				auto gridPos = std::fmod(info.ppqPosition, multiplier);
+
+				if (gridPos == 0.0)
+				{
+					gi.change = true;
+					gi.gridIndex = info.ppqPosition / multiplier;
+					gi.firstGridInPlayback = true;
+					gi.timestamp = 0;
+					waitForFirstGrid = false;
+				}
+				else
+				{
+					waitForFirstGrid = true;
+				}
+			}
+		}
+		
+		uptime = info.timeInSamples;
+
+		if (info.isPlaying && gridEnabled)
+		{
+			auto quarterInSamples = (double)TempoSyncer::getTempoInSamples(info.bpm, sampleRate, 1.0f);
+			auto numSamplesInPPQ = (double)numSamples / quarterInSamples;
+			auto ppqBefore = info.ppqPosition;
+			auto ppqAfter = ppqBefore + numSamplesInPPQ;
+			auto multiplier = (double)TempoSyncer::getTempoFactor(clockGrid);
+
+			auto i1 = (int)(ppqBefore / multiplier);
+			auto i2 = (int)(ppqAfter / multiplier);
+
+			if (i1 != i2)
+			{
+				auto gridPosPPQ = (double)i2 * multiplier;
+				auto deltaPPQ = gridPosPPQ - ppqBefore;
+
+				gi.change = true;
+				gi.gridIndex = i2;
+				gi.timestamp = TempoSyncer::getTempoInSamples(bpm, sampleRate, (float)deltaPPQ);
+
+				if (waitForFirstGrid)
+				{
+					gi.firstGridInPlayback = true;
+					waitForFirstGrid = false;
+				}
+			}
+		}
+
+		return gi;
+	}
+
+	AudioPlayHead::CurrentPositionInfo createInternalPlayHead()
+	{
+		AudioPlayHead::CurrentPositionInfo info;
+		
+		int ms = 1000.0 * uptime / sampleRate;
+		auto quarterMs = TempoSyncer::getTempoInMilliSeconds(bpm, TempoSyncer::Quarter);
+		float quarterPos = ms / quarterMs;
+
+		info.bpm = bpm;
+		info.isPlaying = currentState != State::Idle;
+		info.timeInSamples = uptime;
+		info.ppqPosition = quarterPos;
+
+		return info;
+	}
+
+	void setSamplerate(double newSampleRate)
+	{
+		sampleRate = newSampleRate;
+		updateGridDelta();
+	}
+
+	void setBpm(double newBPM)
+	{
+		bpm = newBPM;
+		updateGridDelta();
+	}
+
+	TempoSyncer::Tempo getCurrentClockGrid() const { return clockGrid; }
+
+	bool allowExternalSync() const 
+	{
+		return currentSyncMode != SyncModes::InternalOnly;
+	}
+
+	bool shouldCreateInternalInfo(const AudioPlayHead::CurrentPositionInfo& externalInfo) const
+	{
+		if (currentSyncMode == SyncModes::Inactive)
+			return false;
+
+		if (currentSyncMode == SyncModes::ExternalOnly)
+			return false;
+
+		if (currentSyncMode == SyncModes::InternalOnly)
+			return true;
+
+		if (currentSyncMode == SyncModes::PreferExternal && (externalInfo.isPlaying || currentState == State::ExternalClockPlay))
+			return false;
+
+		if (currentSyncMode == SyncModes::SyncInternal)
+			return true;
+
+		return true;
+	}
+
+	void setClockGrid(bool enableGrid, TempoSyncer::Tempo t)
+	{
+		gridEnabled = enableGrid;
+		clockGrid = t;
+		updateGridDelta();
+	}
+
+	bool isGridEnabled() const { return gridEnabled; }
+
+	double getPPQPos(int timestampFromNow) const
+	{
+		if (currentSyncMode == SyncModes::Inactive)
+			return 0.0;
+
+		auto quarterSamples = (double)TempoSyncer::getTempoInSamples(bpm, sampleRate, 1.0f);
+		auto uptimeToUse = uptime - timestampFromNow;
+		return uptimeToUse / quarterSamples;
+	}
+
+private:
+
+	void updateGridDelta()
+	{
+		if (gridEnabled)
+		{
+			gridDelta = TempoSyncer::getTempoInSamples(bpm, sampleRate, clockGrid);
+		}
+	}
+
+	bool shouldPreferInternal() const
+	{
+		return currentSyncMode == SyncModes::PreferInternal || currentSyncMode == SyncModes::InternalOnly || currentSyncMode == SyncModes::SyncInternal;
+	}
+
+	bool gridEnabled = false;
+	TempoSyncer::Tempo clockGrid = TempoSyncer::numTempos;
+
+	SyncModes currentSyncMode = SyncModes::Inactive;
+	
+	int64 uptime = 0;
+	int samplesToNextGrid = 0;
+	int gridDelta = 1;
+	int currentGridIndex = 0;
+
+	bool internalClockIsRunning = false;
+
+	double sampleRate = 44100.0;
+	double bpm = 120.0;
+
+	int nextTimestamp = 0;
+	State currentState = State::Idle;
+	State nextState = State::Idle;
+
+	bool waitForFirstGrid = false;
+};
+
 /** This class is a listener class that can react to tempo changes.
 *	@ingroup utility
 *
@@ -2379,7 +2931,7 @@ public:
 	virtual void tempoChanged(double newTempo) {};
 
 	/** The callback function that will be called when the transport state changes (=the user presses play on the DAW). */
-	virtual void onTransportChange(bool isPlaying) {};
+	virtual void onTransportChange(bool isPlaying, double ppqPosition) {};
 
 	/** The callback function that will be called for each musical pulse.
 
@@ -2389,6 +2941,12 @@ public:
 		By default, this function is disabled, so you need to call addPulseListener() to activate this feature.
 		*/
 	virtual void onBeatChange(int beatIndex, bool isNewBar) {};
+
+	/** The callback function that is called on every grid change. This can be used to implement sample accurate sequencers. 
+	
+		By default this is disabled so you need to call addPulseListener() to activate this feature.
+	*/
+	virtual void onGridChange(int gridIndex, uint16 timestamp, bool firstGridEventInPlayback) {};
 
 	/** Called whenever a time signature change occurs. */
 	virtual void onSignatureChange(int newNominator, int numDenominator) {};
@@ -2433,6 +2991,16 @@ public:
 
 };
 
+/** A interface class for getting notified when the realtime mode changed (eg. at DAW export). */
+class NonRealtimeProcessor
+{
+public:
+
+	virtual ~NonRealtimeProcessor() {};
+
+	virtual void nonRealtimeModeChanged(bool isNonRealtime) = 0;
+};
+
 struct FFTHelpers
 {
     enum WindowType
@@ -2469,6 +3037,12 @@ struct FFTHelpers
 
     static void applyWindow(WindowType t, AudioSampleBuffer& b, bool normalise=true);
     
+    static void applyWindow(WindowType t, float* d, int size, bool normalise=true);
+    
+	static float getFreqForLogX(float xPos, float width);
+
+	static float getPixelValueForLogXAxis(float freq, float width);
+
 	static void toComplexArray(const AudioSampleBuffer& phaseBuffer, const AudioSampleBuffer& magBuffer, AudioSampleBuffer& out)
 	{
 		auto phase = phaseBuffer.getReadPointer(0);

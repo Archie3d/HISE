@@ -54,6 +54,7 @@ struct Error
 	{
 		OK,
 		NoMatchingParent,
+		RootIdMismatch,
 		ChannelMismatch,
 		BlockSizeMismatch,
 		IllegalFrameCall,
@@ -70,6 +71,7 @@ struct Error
 		IllegalCompilation,
 		CloneMismatch,
 		IllegalMod,
+		UnscaledModRangeMismatch,
 		numErrorCodes
 	};
 

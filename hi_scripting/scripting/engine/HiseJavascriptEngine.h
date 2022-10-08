@@ -140,6 +140,11 @@ public:
 
 		void addTokens(mcl::TokenCollection::List& tokens) override;
 
+        static void precompileCallback(TokenProvider& p, bool unused)
+        {
+            p.signalClear(sendNotificationSync);
+        }
+        
 		void scriptWasCompiled(JavascriptProcessor *processor) override
 		{
 			if (jp == processor)
@@ -147,6 +152,7 @@ public:
 		}
 
 		WeakReference<JavascriptProcessor> jp;
+        JUCE_DECLARE_WEAK_REFERENCEABLE(TokenProvider);
 	};
 
 	/** Attempts to parse and run a block of javascript code.
@@ -270,7 +276,7 @@ public:
     
 	static bool isJavascriptFunction(const var& v);
     
-	
+	static bool isInlineFunction(const var& v);
 
 	struct ExternalFileData
 	{
@@ -429,12 +435,111 @@ public:
 
 		void prepareCycleReferenceCheck() override;
 
+		struct ScopedLocalThisObject
+		{
+			ScopedLocalThisObject(RootObject& r_, const var& newObject):
+				r(r_)
+			{
+				if (!newObject.isUndefined())
+				{
+					prevObject = r.localThreadThisObject.get();
+					r.localThreadThisObject = newObject;
+				}
+			}
+
+			~ScopedLocalThisObject()
+			{
+				if (!prevObject.isUndefined())
+				{
+					r.localThreadThisObject = prevObject;
+				}
+			}
+
+			RootObject& r;
+			var prevObject;
+		};
+
+		var getLocalThisObject() const { return localThreadThisObject.get(); }
+
 		//==============================================================================
 		struct CodeLocation;
 		struct CallStackEntry;
 		struct Scope;
+        
+        struct LocalScopeCreator
+        {
+            using Ptr = WeakReference<LocalScopeCreator>;
+            
+			struct ScopedSetter
+			{
+				ScopedSetter(ReferenceCountedObjectPtr<RootObject> r_, LocalScopeCreator::Ptr p):
+					r(r_.get())
+				{
+#if ENABLE_SCRIPTING_BREAKPOINTS
+					auto isMessageThread = MessageManager::getInstanceWithoutCreating()->isThisTheMessageThread();
+
+					if (!isMessageThread)
+					{
+						auto& cp = r->currentLocalScopeCreator.get();
+						prevValue = p;
+						std::swap(prevValue, cp);
+						ok = true;
+					}
+#endif
+				}
+
+				~ScopedSetter()
+				{
+#if ENABLE_SCRIPTING_BREAKPOINTS
+					if (ok)
+					{
+						auto& cp = r->currentLocalScopeCreator.get();
+						std::swap(cp, prevValue);
+					}
+#endif
+				};
+
+				RootObject* r;
+				LocalScopeCreator::Ptr prevValue;
+				bool ok = false;
+			};
+
+            virtual ~LocalScopeCreator() {};
+            
+            virtual DynamicObject::Ptr createScope(RootObject* r) = 0;
+            
+            JUCE_DECLARE_WEAK_REFERENCEABLE(LocalScopeCreator);
+        };
+        
+		ThreadLocalValue<LocalScopeCreator::Ptr> currentLocalScopeCreator;
+        
 		struct Statement;
 		struct Expression;
+		
+		struct OptimizationPass
+		{
+			struct OptimizationResult
+			{
+				operator bool() const { return passName.isNotEmpty() && numOptimizedStatements > 0; }
+
+				String passName;
+				int numOptimizedStatements = 0;
+			};
+
+			virtual ~OptimizationPass() {};
+
+			virtual String getPassName() const = 0;
+
+			/** Override this method and return a new optimized statement if this pass can be applied to the statementToOptimize. 
+				
+				You can use the parentStatement to figure out whether this optimisation pass should apply.
+			*/
+			virtual Statement* getOptimizedStatement(Statement* parentStatement, Statement* statementToOptimize) = 0;
+
+			static bool callForEach(Statement* root, const std::function<bool(Statement* child)>& f);
+
+			OptimizationResult executePass(Statement* rootStatementToOptimize);
+		};
 
 		struct ScriptAudioThreadGuard;
 
@@ -545,7 +650,7 @@ public:
 
 		struct VarStatement;			struct LiteralValue; 		struct UnqualifiedName;
 		struct ArraySubscript;			struct Assignment;
-		struct SelfAssignment;			struct PostAssignment;
+		struct SelfAssignment;			struct PostAssignment;		struct AnonymousFunctionWithCapture;
 
 		// Function / Objects
 
@@ -594,14 +699,15 @@ public:
 		static var typeof_internal(Args a);
 		static var exec(Args a);
 		static var eval(Args a);
-
+                            
 		void addToCallStack(const Identifier& id, const CodeLocation* location);
 		void removeFromCallStack(const Identifier& id);
 		String dumpCallStack(const Error& lastError, const Identifier& rootFunctionName);
 		void setCallStackEnabled(bool shouldeBeEnabled) { enableCallstack = shouldeBeEnabled; }
 
 		class Callback:  public DynamicObject,
-					     public DebugableObject
+					     public DebugableObject,
+                         public LocalScopeCreator
 		{
 		public:
 
@@ -623,6 +729,19 @@ public:
 
 			String getDebugName() const override { return callbackName.toString() + "()"; }
 
+            DynamicObject::Ptr createScope(RootObject* r) override
+            {
+                DynamicObject::Ptr obj = new DynamicObject();
+                
+                for (int i = 0; i < numArgs; i++)
+                    obj->setProperty(parameters[i], parameterValues[i]);
+
+                for (int i = 0; i < localProperties.size(); i++)
+                    obj->setProperty(localProperties.getName(i), localProperties.getValueAt(i));
+
+                return obj;
+            }
+            
 			int getNumChildElements() const override
 			{
 				return getNumArgs() + localProperties.size();
@@ -702,9 +821,12 @@ public:
 
 			NamedValueSet localProperties;
 
-		private:
+		
 
 			ScopedPointer<BlockStatement> statements;
+
+			private:
+
 			double lastExecutionTime;
 			const Identifier callbackName;
 			int numArgs;
@@ -768,6 +890,10 @@ public:
 
 			void prepareCycleReferenceCheck() override;
 
+			virtual OptimizationPass::OptimizationResult runOptimisation(OptimizationPass* p);
+
+			bool optimiseFunction(OptimizationPass::OptimizationResult& r, var function, OptimizationPass* p);
+
 			DebugInformation* createDebugInformation(int index);
 
 			const Identifier id;
@@ -775,6 +901,8 @@ public:
 			ReferenceCountedArray<DynamicObject> inlineFunctionSnexBindings;
 			NamedValueSet constObjects;
 			VarRegister	varRegister;
+
+			NamedValueSet comments;
 
 			Array<DebugableObject::Location> registerLocations;
 			Array<DebugableObject::Location> constLocations;
@@ -812,15 +940,23 @@ public:
 
 			DynamicObject* getInlineFunction(const Identifier &id);
 
-			
+			OptimizationPass::OptimizationResult runOptimisation(OptimizationPass* p) override;
 
 			bool updateCyclicReferenceList(CyclicReferenceCheckBase::ThreadData& data, const Identifier& id) override;
 
 			void prepareCycleReferenceCheck() override;
 
-			void setProcessor(JavascriptProcessor *p) noexcept { processor = p; }
+			void setProcessor(JavascriptProcessor *p) noexcept 
+			{ 
+				processor = p; 
+				registerOptimisationPasses();
+			}
+
+			void registerOptimisationPasses();
 
 			static bool initHiddenProperties;
+
+			
 
 			ReferenceCountedArray<ApiClass> apiClasses;
 			Array<Identifier> apiIds;
@@ -833,7 +969,7 @@ public:
 			OwnedArray<RootObject::BlockStatement> callbacks;
 			JavascriptProcessor* processor;
 
-
+			OwnedArray<OptimizationPass> optimizations;
 
 			DynamicObject::Ptr globals;
 
@@ -911,7 +1047,7 @@ public:
 
 		bool shouldUseCycleCheck = false;
 
-
+		ThreadLocalValue<var> localThreadThisObject;
 	};
 
 	
@@ -1035,8 +1171,12 @@ public:
 
 	static void checkValidParameter(int index, const var& valueToTest, const RootObject::CodeLocation& location);
 
+    LambdaBroadcaster<bool> preCompileListeners;
+    
 private:
 
+	
+    
     bool initialising = false;
 	bool externalFunctionPending = false;
 

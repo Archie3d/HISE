@@ -305,7 +305,7 @@ protected:
 
 	bool shouldPopupMenuScaleWithTargetComponent(const PopupMenu::Options& /*options*/) override
 	{
-		return false;
+		return true;
 	};
 
 	void drawPopupMenuBackground(Graphics& g, int width, int height) override
@@ -769,9 +769,6 @@ public:
 	Colour propertyBgColour = Colour(0xff3d3d3d);
 };
 
-class PresetBrowser;
-
-
 
 class PresetBrowserLookAndFeelMethods
 {
@@ -793,8 +790,10 @@ public:
 	virtual ~PresetBrowserLookAndFeelMethods()
 	{};
 
-	virtual void drawPresetBrowserBackground(Graphics& g, PresetBrowser* p);
-	virtual void drawColumnBackground(Graphics& g, Rectangle<int> listArea, const String& emptyText);
+	virtual Path createPresetBrowserIcons(const String& id);
+
+	virtual void drawPresetBrowserBackground(Graphics& g, Component* p);
+	virtual void drawColumnBackground(Graphics& g, int columnIndex, Rectangle<int> listArea, const String& emptyText);
 	virtual void drawTag(Graphics& g, bool blinking, bool active, bool selected, const String& name, Rectangle<int> position);
 	virtual void drawModalOverlay(Graphics& g, Rectangle<int> area, Rectangle<int> labelArea, const String& title, const String& command);
 	virtual void drawListItem(Graphics& g, int columnIndex, int, const String& itemName, Rectangle<int> position, bool rowIsSelected, bool deleteMode, bool hover);
@@ -1176,10 +1175,7 @@ public:
 
 	void drawAlertBox (Graphics &g, AlertWindow &alert, const Rectangle< int > &textArea, juce::TextLayout &textLayout) override;;
 
-private:
-
 	Colour dark, bright, special;
-
 };
 
 
@@ -1273,6 +1269,11 @@ public:
 	}
 
 	static void fillPathHiStyle(Graphics &g, const Path &p, int , int , bool drawBorders = true);;
+
+    static void draw1PixelGrid(Graphics& g, Component* c, Rectangle<int> bounds, Colour lineColour=Colours::white);
+    
+    
+	static Point<float> paintCable(Graphics& g, Rectangle<float> start, Rectangle<float> end, Colour c, float alpha = 1.0f, Colour holeColour = Colour(0xFFAAAAAA), bool returnMidPoint = false, bool useHangingCable=true);;
 
 	static void setTextEditorColours(TextEditor& ed);
 

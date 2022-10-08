@@ -161,9 +161,14 @@ ModulatorSamplerSound::ModulatorSamplerSound(SampleMap* parent, const ValueTree&
 
 	firstSound = soundArray.getFirst().get();
 
-    for(auto s: soundArray)
-        s->setDelayPreloadInitialisation(true);
-    
+	auto gv = parent->getCrossfadeGammaValue();
+
+	for (auto s : soundArray)
+	{
+		s->setDelayPreloadInitialisation(true);
+		s->setCrossfadeGammaValue(gv);
+	}
+
 	ScopedValueSetter<bool> svs(enableAsyncPropertyChange, false);
 
 	for (int i = 0; i < data.getNumProperties(); i++)
@@ -1738,6 +1743,7 @@ ModulatorSamplerSound::EnvelopeTable::EnvelopeTable(ModulatorSamplerSound& paren
 		table.setYTextConverterRaw(getFreqencyString);
 		table.setStartAndEndY(1.0f, 1.0f);
 		break;
+    default: jassertfalse; break;
 	}
 
 	stopTimer();
@@ -1908,7 +1914,7 @@ void ModulatorSamplerSound::EnvelopeTable::processBuffer(AudioSampleBuffer& b, i
 		ps.numChannels = b.getNumChannels();
 
 		filter.prepare(ps);
-		filter.setOrder(JUCE_LIVE_CONSTANT(1));
+		filter.setOrder(JUCE_LIVE_CONSTANT_OFF(1));
 		
 		int offset = 0;
 

@@ -138,6 +138,9 @@ namespace ScriptingObjects
 		/** If this is enabled, the shader will create a buffered image of the last rendering result. */
 		void setEnableCachedBuffer(bool shouldEnableBuffer);
 
+		/** Adds a preprocessor definition before the code and recompiles the shader (Empty string removes all preprocessors). */
+		void setPreprocessor(String preprocessorString, var value);
+
 		// ===========================================================================
 
 		int blockWhileWaiting() override;
@@ -238,6 +241,8 @@ namespace ScriptingObjects
 
 	private:
 
+		NamedValueSet preprocessors;
+
 		bool screenshotPending = false;
 		static bool renderingScreenShot;
 
@@ -270,11 +275,12 @@ namespace ScriptingObjects
 
 		Identifier getObjectName() const override { RETURN_STATIC_IDENTIFIER("Path"); }
 
+		String getDebugName() const override { return "Path"; }
 
 		String getDebugValue() const override {
 			return p.getBounds().toString();
 		}
-		String getDebugName() const override { return "Path"; }
+		
 
 		Component* createPopupComponent(const MouseEvent& e, Component *c) override;
 
@@ -309,6 +315,12 @@ namespace ScriptingObjects
 		/** Creates a fillable path using the provided strokeData (with optional dot. */
 		var createStrokedPath(var strokeData, var dotData);
 
+		/** Creates a string representation of this path. */
+		String toString();
+
+		/** Restores a path that has been converted into a string. */
+		void fromString(String stringPath);
+
 		// ============================================================================================================
 
 		struct Wrapper;
@@ -326,6 +338,46 @@ namespace ScriptingObjects
 		// ============================================================================================================
 	};
 
+	class MarkdownObject : public ConstScriptingObject
+	{
+	public:
+
+		MarkdownObject(ProcessorWithScriptingContent* pwsc);;
+
+		Identifier getObjectName() const override { RETURN_STATIC_IDENTIFIER("MarkdownRenderer"); }
+
+		String getDebugName() const override { return "MarkdownRenderer"; }
+
+		Component* createPopupComponent(const MouseEvent& e, Component *c) override;
+
+		// ============================================================================================================ API
+
+		/** Set the markdown text to be displayed. */
+		void setText(const String& markdownText);
+
+		/** Parses the text for the specified area and returns the used height (might be more or less than the height of the area passed in). */
+		float setTextBounds(var area);
+
+		/** Sets the style data for the markdown renderer. */
+		void setStyleData(var styleData);
+
+		/** Returns the current style data. */
+		var getStyleData();
+
+		/** Creates an image provider from the given JSON data that resolves image links. */
+		void setImageProvider(var data);
+
+		// ============================================================================================================ API End
+
+		hise::DrawActions::MarkdownAction::Ptr obj;
+
+	private:
+
+		struct ScriptedImageProvider;
+
+		struct Preview;
+		struct Wrapper;
+	};
 
 	class GraphicsObject : public ConstScriptingObject
 	{
@@ -375,14 +427,17 @@ namespace ScriptingObjects
 		/** Draws a rectangle. */
 		void drawRect(var area, float borderSize);
 
-		/** Fills a rounded rectangle. */
-		void fillRoundedRectangle(var area, float cornerSize);
+		/** Fills a rounded rectangle. cornerData can be either a float number (for the corner size) or a JSON object for more customization options. */
+		void fillRoundedRectangle(var area, var cornerData);
 
-		/** Draws a rounded rectangle. */
-		void drawRoundedRectangle(var area, float cornerSize, float borderSize);
+		/** Draws a rounded rectangle. cornerData can be either a float number (for the corner size) or a JSON object for more customization options.*/
+		void drawRoundedRectangle(var area, var cornerData, float borderSize);
 
 		/** Draws a (non interpolated) horizontal line. */
 		void drawHorizontalLine(int y, float x1, float x2);
+
+		/** Draws a (non interpolated) vertical line. */
+		void drawVerticalLine(int x, float y1, float y2);
 
 		/** Sets a global transparency level. */
 		void setOpacity(float alphaValue);
@@ -396,6 +451,9 @@ namespace ScriptingObjects
 		/** Sets the current font. */
 		void setFont(String fontName, float fontSize);
 
+		/** Sets the current font with the specified spacing between the characters. */
+		void setFontWithSpacing(String fontName, float fontSize, float spacing);
+
 		/** Draws a centered and vertically stretched text. */
 		void drawText(String text, var area);
 
@@ -404,6 +462,12 @@ namespace ScriptingObjects
 		
 		/** Tries to draw a text string inside a given space. */
 		void drawFittedText(String text, var area, String alignment, int maxLines, float scale);
+
+		/** Break to new lines when the text becomes wider than maxWidth. */
+		void drawMultiLineText(String text, var xy, int maxWidth, String alignment, float leading);
+
+		/** Draws the text of the given markdown renderer to its specified area. */
+		void drawMarkdownText(var markdownRenderer);
 
 		/** Sets the current gradient via an array [Colour1, x1, y1, Colour2, x2, y2] */
 		void setGradientFill(var gradientData);
@@ -450,9 +514,11 @@ namespace ScriptingObjects
 		/** Adds a drop shadow based on the alpha values of the current image. */
 		void addDropShadowFromAlpha(var colour, int radius);
 
-		/** Applies an OpenGL shader to the panel. */
-		void applyShader(var shader, var area);
+		/** Applies an OpenGL shader to the panel. Returns false if the shader could not be compiled. */
+		bool applyShader(var shader, var area);
 
+		/** Returns the width of the string using the current font. */
+		float getStringWidth(String text);
 
 		/** Fills a Path. */
 		void fillPath(var path, var area);
@@ -463,6 +529,9 @@ namespace ScriptingObjects
 		/** Rotates the canvas around center `[x, y]` by the given amount in radian. */
 		void rotate(var angleInRadian, var center);
 
+        /** Flips the canvas at the center. */
+        void flip(bool horizontally, var totalArea);
+        
 		// ============================================================================================================
 
 		struct Wrapper;
@@ -476,6 +545,8 @@ namespace ScriptingObjects
 		Rectangle<float> getRectangleFromVar(const var &data);
 		Rectangle<int> getIntRectangleFromVar(const var &data);
 
+		Font currentFont;
+
 		Result rectangleResult;
 
 		ConstScriptingObject* parent = nullptr;
@@ -487,7 +558,8 @@ namespace ScriptingObjects
 		// ============================================================================================================
 	};
 
-	class ScriptedLookAndFeel : public ConstScriptingObject
+	class ScriptedLookAndFeel : public ConstScriptingObject,
+								public ControlledObject
 	{
 	public:
 
@@ -500,10 +572,15 @@ namespace ScriptingObjects
 			public NumberTag::LookAndFeelMethods,
 			public MessageWithIcon::LookAndFeelMethods,
 			public ControlledObject,
+			public FilterGraph::LookAndFeelMethods,
+			public FilterDragOverlay::LookAndFeelMethods,
 			public RingBufferComponentBase::LookAndFeelMethods,
 			public AhdsrGraph::LookAndFeelMethods,
 			public MidiFileDragAndDropper::LookAndFeelMethods,
-			public CustomKeyboardLookAndFeelBase
+			public SliderPack::LookAndFeelMethods,
+			public CustomKeyboardLookAndFeelBase,
+			public ScriptTableListModel::LookAndFeelMethods,
+            public MatrixPeakMeter::LookAndFeelMethods
 		{
 			Laf(MainController* mc) :
 				ControlledObject(mc)
@@ -523,6 +600,8 @@ namespace ScriptingObjects
 				else
 					return GLOBAL_BOLD_FONT();
 			}
+
+			
 
 			void drawAlertBox(Graphics&, AlertWindow&, const Rectangle<int>& textArea, TextLayout&) override;
 
@@ -563,8 +642,9 @@ namespace ScriptingObjects
 
 			void drawNumberTag(Graphics& g, Colour& c, Rectangle<int> area, int offset, int size, int number) override;
 
-			void drawPresetBrowserBackground(Graphics& g, PresetBrowser* p) override;
-			void drawColumnBackground(Graphics& g, Rectangle<int> listArea, const String& emptyText) override;
+			Path createPresetBrowserIcons(const String& id) override;
+			void drawPresetBrowserBackground(Graphics& g, Component* p) override;
+			void drawColumnBackground(Graphics& g, int columnIndex, Rectangle<int> listArea, const String& emptyText) override;
 			void drawTag(Graphics& g, bool blinking, bool active, bool selected, const String& name, Rectangle<int> position) override;
 			void drawModalOverlay(Graphics& g, Rectangle<int> area, Rectangle<int> labelArea, const String& title, const String& command) override;
 			void drawListItem(Graphics& g, int columnIndex, int, const String& itemName, Rectangle<int> position, bool rowIsSelected, bool deleteMode, bool hover) override;
@@ -577,6 +657,7 @@ namespace ScriptingObjects
 
 			void drawScrollbar(Graphics& g, ScrollBar& scrollbar, int x, int y, int width, int height, bool isScrollbarVertical, int thumbStartPosition, int thumbSize, bool isMouseOver, bool isMouseDown) override;
 
+			void drawAhdsrBackground(Graphics& g, AhdsrGraph& graph) override;
 			void drawAhdsrPathSection(Graphics& g, AhdsrGraph& graph, const Path& s, bool isActive) override;
 			void drawAhdsrBallPosition(Graphics& g, AhdsrGraph& graph, Point<float> p) override;
 
@@ -586,12 +667,45 @@ namespace ScriptingObjects
             void drawHiseThumbnailBackground(Graphics& g, HiseAudioThumbnail& th, bool areaIsEnabled, Rectangle<int> area) override;
             void drawHiseThumbnailPath(Graphics& g, HiseAudioThumbnail& th, bool areaIsEnabled, const Path& path) override;
             void drawHiseThumbnailRectList(Graphics& g, HiseAudioThumbnail& th, bool areaIsEnabled, const HiseAudioThumbnail::RectangleListType& rectList) override;
+
+            HiseAudioThumbnail::RenderOptions getThumbnailRenderOptions(HiseAudioThumbnail& th, const HiseAudioThumbnail::RenderOptions& defaultOptions) override;
+            
+			void drawThumbnailRuler(Graphics& g, HiseAudioThumbnail& te, int xPosition) override;
+
             void drawTextOverlay(Graphics& g, HiseAudioThumbnail& th, const String& text, Rectangle<float> area) override;
             
 			void drawKeyboardBackground(Graphics &g, Component* c, int width, int height) override;
 			void drawWhiteNote(CustomKeyboardState* state, Component* c, int midiNoteNumber, Graphics &g, int x, int y, int w, int h, bool isDown, bool isOver, const Colour &lineColour, const Colour &textColour) override;
 			void drawBlackNote(CustomKeyboardState* state, Component* c, int midiNoteNumber, Graphics &g, int x, int y, int w, int h, bool isDown, bool isOver, const Colour &noteFillColour) override;
 
+			void drawSliderPackBackground(Graphics& g, SliderPack& s) override;
+			void drawSliderPackFlashOverlay(Graphics& g, SliderPack& s, int sliderIndex, Rectangle<int> sliderBounds, float intensity) override;
+			void drawSliderPackRightClickLine(Graphics& g, SliderPack& s, Line<float> lineToDraw) override;
+			void drawSliderPackTextPopup(Graphics& g, SliderPack& s, const String& textToDraw) override;
+
+			void drawTableRowBackground(Graphics& g, const ScriptTableListModel::LookAndFeelData& d, int rowNumber, int width, int height, bool rowIsSelected) override;
+
+			void drawTableCell(Graphics& g, const  ScriptTableListModel::LookAndFeelData& d, const String& text, int rowNumber, int columnId, int width, int height, bool rowIsSelected, bool cellIsClicked, bool cellIsHovered) override;
+
+			void drawTableHeaderBackground(Graphics& g, TableHeaderComponent& h) override;
+
+			void drawTableHeaderColumn(Graphics& g, TableHeaderComponent&, const String& columnName, int columnId, int width, int height, bool isMouseOver, bool isMouseDown, int columnFlags) override;
+
+            void getIdealPopupMenuItemSize(const String &text, bool isSeparator, int standardMenuItemHeight, int &idealWidth, int &idealHeight) override;
+            
+			void drawFilterDragHandle(Graphics& g, FilterDragOverlay& o, int index, Rectangle<float> handleBounds, const FilterDragOverlay::DragData& d) override;
+
+			void drawFilterBackground(Graphics &g, FilterGraph& fg) override;
+			void drawFilterPath(Graphics& g, FilterGraph& fg, const Path& p) override;
+			void drawFilterGridLines(Graphics &g, FilterGraph& fg, const Path& gridPath) override;
+            
+			void drawOscilloscopeBackground(Graphics& g, RingBufferComponentBase& ac, Rectangle<float> areaToFill) override;
+			void drawOscilloscopePath(Graphics& g, RingBufferComponentBase& ac, const Path& p) override;
+			void drawGonioMeterDots(Graphics& g, RingBufferComponentBase& ac, const RectangleList<float>& dots, int index) override;
+			void drawAnalyserGrid(Graphics& g, RingBufferComponentBase& ac, const Path& p) override;
+
+            void drawMatrixPeakMeter(Graphics& g, float* peakValues, float* maxPeaks, int numChannels, bool isVertical, float segmentSize, float paddingSize, Component* c) override;
+            
 			Image createIcon(PresetHandler::IconType type) override;
 
 			bool functionDefined(const String& s);
@@ -646,6 +760,8 @@ namespace ScriptingObjects
             return 0;
 		}
 
+		Location getLocation() const override;
+
 		DebugInformationBase* getChildElement(int index) override
 		{
 			WeakReference<ScriptedLookAndFeel> safeThis(this);
@@ -678,8 +794,19 @@ namespace ScriptingObjects
 
 		static Array<Identifier> getAllFunctionNames();
 
+        
 		Font f = GLOBAL_BOLD_FONT();
-		ReferenceCountedObjectPtr<GraphicsObject> g;
+        
+        struct GraphicsWithComponent
+        {
+            ReferenceCountedObjectPtr<GraphicsObject> g;
+            Identifier functionName;
+            Component* c = nullptr;
+        };
+        
+        Array<GraphicsWithComponent> graphics;
+        
+		
 
 		var functions;
 
@@ -704,6 +831,8 @@ namespace ScriptingObjects
 
 		const bool wasGlobal;
 		Array<NamedImage> loadedImages;
+
+		Result lastResult;
 
 		JUCE_DECLARE_WEAK_REFERENCEABLE(ScriptedLookAndFeel);
 		JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(ScriptedLookAndFeel);
